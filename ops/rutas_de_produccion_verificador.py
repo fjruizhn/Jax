@@ -89,7 +89,9 @@ PERMITIDOS_POR_CLAVE: dict[str, tuple[str, ...]] = {
 }
 
 #: Claves de ruta EXCLUIDAS del chequeo genérico "nada bajo /home/*", con
-#: motivo escrito -- nunca por omisión.
+#: motivo escrito -- nunca por omisión. `JAX_WORKSPACE_DIR` salió de esta
+#: lista el 2026-10-21: desde el 2026-10-03 (master) vive en
+#: /srv/jax-data/jax-workspace y ya no tiene motivo para estar bajo /home.
 EXCEPCIONES_FASE_A: dict[str, str] = {
     "JAX_MISSIONS_DIR": (
         "consumidor real (jax-platform/backend/api/command.py: "
@@ -104,12 +106,6 @@ EXCEPCIONES_FASE_A: dict[str, str] = {
         "cd $HOME/jax y usa su propio .venv -- moverlo decide DESDE QUÉ "
         "CHECKOUT corre cada misión, no sólo una ruta de config/log. "
         "Pendiente, decisión de Fernando."
-    ),
-    "JAX_WORKSPACE_DIR": (
-        "decisión de diseño de la tarea original (HECHOS, 2026-09-25): vive "
-        "bajo /home/fruiz/jax-workspace A PROPÓSITO -- no es el checkout de "
-        "código de un agente ni un dato de producción, es un directorio de "
-        "trabajo aparte. Se queda."
     ),
 }
 
@@ -161,6 +157,16 @@ class Hallazgo:
     motivo: str
 
 
+def _describir_sin_valor(linea: str) -> str:
+    """Describe una línea del `.env` SIN su valor (2026-10-21, auditoría de
+    jax#277, MINOR-1): el reporte sale por la terminal y, si lo corre un
+    agente, queda en su transcripción -- una línea mal formada puede ser la
+    de una contraseña. Solo el nombre (lo que hay antes del primer `=`,
+    recortado) y el largo total."""
+    nombre = linea.split("=", 1)[0].strip() if "=" in linea else "(sin =)"
+    return f"nombre {nombre!r}, {len(linea)} caracteres (valor omitido)"
+
+
 def parsear_env(texto: str) -> tuple[dict[str, list[str]], list[Hallazgo]]:
     """(clave -> lista de valores CRUDOS en orden de aparición, errores de
     parseo con número de línea). YA NO IGNORA NADA EN SILENCIO (ronda 2,
@@ -183,14 +189,14 @@ def parsear_env(texto: str) -> tuple[dict[str, list[str]], list[Hallazgo]]:
         if not m:
             errores.append(Hallazgo(
                 f"línea {numero}",
-                f"no calza NOMBRE=valor exacto (¿indentada? ¿espacio junto al \"=\"?): {linea!r}",
+                f"no calza NOMBRE=valor exacto (¿indentada? ¿espacio junto al \"=\"?): {_describir_sin_valor(linea)}",
             ))
             continue
         clave, crudo = m.group(1), m.group(2)
         if crudo.endswith("\\"):
             errores.append(Hallazgo(
                 f"línea {numero}",
-                f"termina en \"\\\" (continuación de línea de systemd, no soportada por este parser): {linea!r}",
+                f"termina en \"\\\" (continuación de línea de systemd, no soportada por este parser): {_describir_sin_valor(linea)}",
             ))
             continue
         entorno.setdefault(clave, []).append(crudo)
@@ -367,12 +373,17 @@ def verificar_fase_a(
 
 EjecutarSudo = Callable[[list[str]], "subprocess.CompletedProcess[str]"]
 
+# Ninguna función de abajo tiene `ejecutar` por defecto (2026-10-21, auditoría
+# de jax#277, MINOR-3): con default a `_ejecutar_sudo_real`, una prueba que lo
+# omitía corría sudo de verdad -- pasaba en hall9000 y fallaba en el runner.
+# El único que inyecta el ejecutor real es `_main`, vía `verificar`.
+
 
 def _ejecutar_sudo_real(argv: list[str]) -> "subprocess.CompletedProcess[str]":
     return subprocess.run(argv, capture_output=True, text=True, timeout=15)
 
 
-def resolver_como_jaxsvc(ruta: str, ejecutar: EjecutarSudo = _ejecutar_sudo_real) -> str | None:
+def resolver_como_jaxsvc(ruta: str, ejecutar: EjecutarSudo) -> str | None:
     """`realpath -e` (existe Y resuelve symlinks) corrido como jaxsvc -- la
     cuenta real que usa estas rutas, no fruiz ni root. `None` si no existe o
     sin permiso."""
@@ -382,7 +393,7 @@ def resolver_como_jaxsvc(ruta: str, ejecutar: EjecutarSudo = _ejecutar_sudo_real
     return r.stdout.strip()
 
 
-def resolver_como_jaxsvc_permitiendo_ausente(ruta: str, ejecutar: EjecutarSudo = _ejecutar_sudo_real) -> str | None:
+def resolver_como_jaxsvc_permitiendo_ausente(ruta: str, ejecutar: EjecutarSudo) -> str | None:
     """`realpath -m` (canonicaliza aunque la ruta NO exista) corrido como
     jaxsvc -- para las claves de EXISTENCIA_OPCIONAL (ronda 4, MINOR-1).
     Antes, cuando `realpath -e` fallaba (el caso SANO para estas claves),
@@ -409,7 +420,25 @@ def _exigir_ruta_absoluta_para_test(ruta: str) -> None:
         raise ValueError(f"ruta no absoluta, me niego a pasarla a test sin --: {ruta!r}")
 
 
-def jaxsvc_puede_leer(ruta: str, ejecutar: EjecutarSudo = _ejecutar_sudo_real) -> bool:
+class ComprobacionImposible(RuntimeError):
+    """`test` no dio una respuesta: error de uso (rc=2, el DEFECTO de la ronda
+    3 con `--`), sudo que no pudo ejecutar (rc=1 CON stderr: «a password is
+    required»), o cualquier otro código. Antes se leía como `False` --
+    «jaxsvc no puede» -- y una prueba no distinguía el defecto de la
+    respuesta real (2026-10-21, auditoría de jax#277, MINOR-2)."""
+
+
+def _respuesta_de_test(r: "subprocess.CompletedProcess[str]") -> bool:
+    """rc=0 -> True; rc=1 SIN stderr (lo único que `test` emite al decir
+    «no») -> False; cualquier otra cosa -> ComprobacionImposible."""
+    if r.returncode == 0:
+        return True
+    if r.returncode == 1 and not (r.stderr or "").strip():
+        return False
+    raise ComprobacionImposible(f"rc={r.returncode}, stderr={(r.stderr or '').strip()[:200]!r}")
+
+
+def jaxsvc_puede_leer(ruta: str, ejecutar: EjecutarSudo) -> bool:
     """DEFECTO real (ronda 3 de la auditoría de escalón 3, jax#277,
     encontrado ejecutando el Paso 8.4 del runbook contra producción real):
     esta función usaba `sudo -n -u jaxsvc test -r -- <ruta>`. `test` (a
@@ -425,13 +454,13 @@ def jaxsvc_puede_leer(ruta: str, ejecutar: EjecutarSudo = _ejecutar_sudo_real) -
     nunca el comando real -- ver
     `tests/test_rutas_de_produccion_verificador.py::test_jaxsvc_puede_leer_contra_el_comando_real_no_el_mock`."""
     _exigir_ruta_absoluta_para_test(ruta)
-    return ejecutar(["sudo", "-n", "-u", "jaxsvc", "test", "-r", ruta]).returncode == 0
+    return _respuesta_de_test(ejecutar(["sudo", "-n", "-u", "jaxsvc", "test", "-r", ruta]))
 
 
-def jaxsvc_puede_escribir(ruta: str, ejecutar: EjecutarSudo = _ejecutar_sudo_real) -> bool:
+def jaxsvc_puede_escribir(ruta: str, ejecutar: EjecutarSudo) -> bool:
     """Mismo DEFECTO que `jaxsvc_puede_leer` -- ver ahí."""
     _exigir_ruta_absoluta_para_test(ruta)
-    return ejecutar(["sudo", "-n", "-u", "jaxsvc", "test", "-w", ruta]).returncode == 0
+    return _respuesta_de_test(ejecutar(["sudo", "-n", "-u", "jaxsvc", "test", "-w", ruta]))
 
 
 @dataclass
@@ -441,7 +470,7 @@ class ResultadoFaseB:
 
 def verificar_fase_b(
     entorno: dict[str, list[str]],
-    ejecutar: EjecutarSudo = _ejecutar_sudo_real,
+    ejecutar: EjecutarSudo,
 ) -> ResultadoFaseB:
     """Sólo corre sobre las tres claves en alcance, y sólo si Fase A ya las
     encontró con un valor único y no vacío (si Fase A ya las marcó ausentes/
@@ -451,14 +480,21 @@ def verificar_fase_b(
         valor, motivo = _valor_unico_normalizado(clave, entorno.get(clave, []))
         if motivo:
             continue  # ya lo reportó Fase A
-        if not jaxsvc_puede_leer(valor, ejecutar):
-            resultado.problemas.append(Hallazgo(clave, f"{valor}: jaxsvc no puede LEER esta ruta"))
-        if clave == "JAX_AUDIT_LOG_PATH" and not jaxsvc_puede_escribir(valor, ejecutar):
-            resultado.problemas.append(Hallazgo(clave, f"{valor}: jaxsvc no puede ESCRIBIR el log de auditoría"))
+        comprobaciones = [(jaxsvc_puede_leer, valor, f"{valor}: jaxsvc no puede LEER esta ruta")]
+        if clave == "JAX_AUDIT_LOG_PATH":
+            comprobaciones.append(
+                (jaxsvc_puede_escribir, valor, f"{valor}: jaxsvc no puede ESCRIBIR el log de auditoría"))
         if clave == "JAX_REPO_BASE":
             documentos = valor.rstrip("/") + "/documents"
-            if not jaxsvc_puede_escribir(documentos, ejecutar):
-                resultado.problemas.append(Hallazgo(clave, f"jaxsvc no puede ESCRIBIR en {documentos}"))
+            comprobaciones.append(
+                (jaxsvc_puede_escribir, documentos, f"jaxsvc no puede ESCRIBIR en {documentos}"))
+        for comprobar, ruta, motivo_no in comprobaciones:
+            try:
+                if not comprobar(ruta, ejecutar):
+                    resultado.problemas.append(Hallazgo(clave, motivo_no))
+            except ComprobacionImposible as e:
+                resultado.problemas.append(
+                    Hallazgo(clave, f"{ruta}: no se pudo comprobar el acceso de jaxsvc ({e})"))
     return resultado
 
 
@@ -469,7 +505,7 @@ def verificar_fase_b(
 #  siempre, aporta evidencia aparte.
 # ---------------------------------------------------------------------------
 
-def obtener_main_pid(servicio: str, ejecutar: EjecutarSudo = _ejecutar_sudo_real) -> str | None:
+def obtener_main_pid(servicio: str, ejecutar: EjecutarSudo) -> str | None:
     r = ejecutar(["systemctl", "show", "-p", "MainPID", "--value", servicio])
     if r.returncode != 0:
         return None
@@ -479,7 +515,7 @@ def obtener_main_pid(servicio: str, ejecutar: EjecutarSudo = _ejecutar_sudo_real
     return valor
 
 
-def leer_environ_del_proceso(pid: str, ejecutar: EjecutarSudo = _ejecutar_sudo_real) -> dict[str, str] | None:
+def leer_environ_del_proceso(pid: str, ejecutar: EjecutarSudo) -> dict[str, str] | None:
     """`/proc/<pid>/environ`: pares NOMBRE=valor separados por NUL, sin
     ningún tipo de citado de shell -- lo que systemd cargó de VERDAD, sin
     pasar por la interpretación de este módulo."""
@@ -504,8 +540,9 @@ class ResultadoFaseC:
 
 def verificar_fase_c(
     resolver: Callable[[str], str | None],
-    obtener_pid: Callable[[str], str | None] = obtener_main_pid,
-    leer_environ: Callable[[str], dict[str, str] | None] = leer_environ_del_proceso,
+    *,
+    obtener_pid: Callable[[str], str | None],
+    leer_environ: Callable[[str], dict[str, str] | None],
 ) -> ResultadoFaseC:
     resultado = ResultadoFaseC()
     for servicio in SERVICIOS:
@@ -551,15 +588,23 @@ def verificar_fase_c(
 #  CLI -- envoltura fina.
 # ---------------------------------------------------------------------------
 
-def verificar(texto_env: str) -> tuple[bool, str]:
+def verificar(texto_env: str, ejecutar: EjecutarSudo) -> tuple[bool, str]:
     """(ok, reporte). `ok=False` con CUALQUIER problema de Fase A, Fase B o
-    Fase C (errores de parseo incluidos, vía Fase A)."""
+    Fase C (errores de parseo incluidos, vía Fase A). `ejecutar` es el único
+    punto por donde salen comandos (sudo, systemctl): `_main` pasa el real."""
     entorno, errores_de_parseo = parsear_env(texto_env)
+
+    def resolver(ruta: str) -> str | None:
+        return resolver_como_jaxsvc(ruta, ejecutar)
+
     fase_a = verificar_fase_a(
-        entorno, resolver_como_jaxsvc, errores_de_parseo,
-        resolver_permitiendo_ausente=resolver_como_jaxsvc_permitiendo_ausente)
-    fase_b = verificar_fase_b(entorno, _ejecutar_sudo_real) if fase_a.ok else ResultadoFaseB()
-    fase_c = verificar_fase_c(resolver_como_jaxsvc)
+        entorno, resolver, errores_de_parseo,
+        resolver_permitiendo_ausente=lambda ruta: resolver_como_jaxsvc_permitiendo_ausente(ruta, ejecutar))
+    fase_b = verificar_fase_b(entorno, ejecutar) if fase_a.ok else ResultadoFaseB()
+    fase_c = verificar_fase_c(
+        resolver,
+        obtener_pid=lambda servicio: obtener_main_pid(servicio, ejecutar),
+        leer_environ=lambda pid: leer_environ_del_proceso(pid, ejecutar))
 
     lineas: list[str] = []
     if fase_a.problemas:
@@ -612,7 +657,7 @@ def _main(argv: list[str]) -> int:
         print("rutas-de-produccion: sudo -n cat /etc/jax/.env falló", file=sys.stderr)
         return 1
 
-    ok, reporte = verificar(leido.stdout)
+    ok, reporte = verificar(leido.stdout, _ejecutar_sudo_real)
     print(reporte, file=(sys.stdout if ok else sys.stderr))
     return 0 if ok else 1
 

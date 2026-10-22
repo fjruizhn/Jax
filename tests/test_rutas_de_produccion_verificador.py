@@ -71,6 +71,23 @@ def _ejecutar_siempre_falla(argv):
     return CompletedProcess(argv, 1, stdout="", stderr="")
 
 
+def _ejecutar_de_mentira(argv):
+    """Emula los comandos que corre `verificar()` sin tocar sudo ni systemctl:
+    `realpath` devuelve la ruta tal cual, `test` dice que sí, los dos
+    servicios tienen PID 4242 y su entorno vivo trae las rutas sanas."""
+    from subprocess import CompletedProcess
+    if argv[:4] == ["sudo", "-n", "-u", "jaxsvc"] and argv[4] == "realpath":
+        return CompletedProcess(argv, 0, stdout=argv[-1] + "\n", stderr="")
+    if argv[:4] == ["sudo", "-n", "-u", "jaxsvc"] and argv[4] == "test":
+        return CompletedProcess(argv, 0, stdout="", stderr="")
+    if argv[:2] == ["systemctl", "show"]:
+        return CompletedProcess(argv, 0, stdout="4242\n", stderr="")
+    if argv == ["sudo", "-n", "cat", "/proc/4242/environ"]:
+        vivo = "\x00".join(f"{k}={v[0]}" for k, v in ENTORNO_SANO.items()) + "\x00"
+        return CompletedProcess(argv, 0, stdout=vivo, stderr="")
+    raise AssertionError(f"comando inesperado en la prueba: {argv}")
+
+
 # --- parsear_env / normalizar_valor -----------------------------------------
 
 def test_parsear_env_ignora_comentarios_y_lineas_en_blanco():
@@ -267,29 +284,26 @@ def test_caso_5_ruta_que_no_resuelve_ni_existe_es_falla():
 
 
 # --- Caso 6: JAX_WORKSPACE_DIR bajo /home -----------------------------------
+# Hasta el 2026-10-21 era excepción declarada (vivía en /home/fruiz a
+# propósito). Desde el 2026-10-03 (master) vive en /srv/jax-data/jax-workspace,
+# así que ya no hay motivo: bajo /home falla como cualquier otra clave.
 
-def test_caso_6_workspace_dir_bajo_home_es_excepcion_declarada_no_pasa_por_accidente():
-    assert "JAX_WORKSPACE_DIR" in EXCEPCIONES_FASE_A
-    assert EXCEPCIONES_FASE_A["JAX_WORKSPACE_DIR"].strip()
+def test_caso_6_workspace_dir_ya_no_es_excepcion_y_bajo_home_falla():
+    assert "JAX_WORKSPACE_DIR" not in EXCEPCIONES_FASE_A
 
     entorno = dict(ENTORNO_SANO)
-    entorno["JAX_WORKSPACE_DIR"] = ["/home/fruiz/jax-workspace"]
+    entorno["JAX_WORKSPACE_DIR"] = ["/home/" + "fruiz/jax-workspace"]
+    resultado = verificar_fase_a(entorno, _resolver_identidad(), resolver_permitiendo_ausente=_resolver_identidad())
+    assert not resultado.ok
+    motivo = next(h.motivo for h in resultado.problemas if h.clave == "JAX_WORKSPACE_DIR")
+    assert "/home/" in motivo
+
+
+def test_caso_6_workspace_dir_en_srv_jax_data_pasa():
+    entorno = dict(ENTORNO_SANO)
+    entorno["JAX_WORKSPACE_DIR"] = ["/srv/jax-data/jax-workspace"]
     resultado = verificar_fase_a(entorno, _resolver_identidad(), resolver_permitiendo_ausente=_resolver_identidad())
     assert resultado.ok, resultado.problemas
-
-    excepciones_de_prueba = dict(EXCEPCIONES_FASE_A)
-    del excepciones_de_prueba["JAX_WORKSPACE_DIR"]
-    import rutas_de_produccion_verificador as mod
-    original = mod.EXCEPCIONES_FASE_A
-    try:
-        mod.EXCEPCIONES_FASE_A = excepciones_de_prueba
-        resultado_sin_excepcion = verificar_fase_a(entorno, _resolver_identidad(), resolver_permitiendo_ausente=_resolver_identidad())
-    finally:
-        mod.EXCEPCIONES_FASE_A = original
-    assert not resultado_sin_excepcion.ok, (
-        "sin la excepcion declarada, JAX_WORKSPACE_DIR bajo /home/ tendria "
-        "que fallar -- si esto pasa, el chequeo generico /home/* no esta "
-        "funcionando")
 
 
 def test_jax_kill_switch_path_ausente_pasa_pero_bajo_home_falla():
@@ -431,6 +445,10 @@ def test_fase_b_pasa_si_jaxsvc_puede_todo():
 
 # --- Fase C: verdad efectiva contra /proc/<MainPID>/environ -----------------
 
+def _no_deberia_leer_environ(pid):
+    raise AssertionError(f"sin PID no se lee ningún environ (pid={pid})")
+
+
 def test_fase_c_sin_ningun_servicio_revisado_es_problema():
     """Ronda 3, MINOR-1: antes, con los DOS servicios sin PID,
     `resultado.problemas` quedaba vacío -- "todo bien" por accidente, sin
@@ -438,6 +456,7 @@ def test_fase_c_sin_ningun_servicio_revisado_es_problema():
     resultado = verificar_fase_c(
         _resolver_identidad(),
         obtener_pid=lambda servicio: None,
+        leer_environ=_no_deberia_leer_environ,
     )
     assert resultado.problemas, "sin ningun servicio revisado, Fase C tiene que fallar, no dar verde por vacio"
     assert set(resultado.servicios_sin_pid) == {"jax-las-manos", "jax-platform"}
@@ -517,19 +536,9 @@ def test_verificar_de_punta_a_punta_ok():
         "JAX_REPO_BASE=/srv/jax-data/repo\n"
     )
     import rutas_de_produccion_verificador as mod
-    original_resolver = mod.resolver_como_jaxsvc
-    original_ejecutar = mod._ejecutar_sudo_real
-    original_fase_c = mod.verificar_fase_c
-    try:
-        mod.resolver_como_jaxsvc = lambda ruta, ejecutar=None: ruta
-        mod._ejecutar_sudo_real = _ejecutar_siempre_ok
-        mod.verificar_fase_c = lambda resolver: mod.ResultadoFaseC()
-        ok, reporte = mod.verificar(texto)
-    finally:
-        mod.resolver_como_jaxsvc = original_resolver
-        mod._ejecutar_sudo_real = original_ejecutar
-        mod.verificar_fase_c = original_fase_c
+    ok, reporte = mod.verificar(texto, _ejecutar_de_mentira)
     assert ok, reporte
+    assert "2 servicio(s)" in reporte
 
 
 def test_verificar_de_punta_a_punta_rojo_contra_home_fruiz():
@@ -541,15 +550,7 @@ def test_verificar_de_punta_a_punta_rojo_contra_home_fruiz():
         "JAX_REPO_BASE=/home/fruiz/jax/repo\n"
     )
     import rutas_de_produccion_verificador as mod
-    original_resolver = mod.resolver_como_jaxsvc
-    original_fase_c = mod.verificar_fase_c
-    try:
-        mod.resolver_como_jaxsvc = lambda ruta, ejecutar=None: ruta
-        mod.verificar_fase_c = lambda resolver: mod.ResultadoFaseC()
-        ok, reporte = mod.verificar(texto)
-    finally:
-        mod.resolver_como_jaxsvc = original_resolver
-        mod.verificar_fase_c = original_fase_c
+    ok, reporte = mod.verificar(texto, _ejecutar_de_mentira)
     assert not ok
     assert "JAX_CONFIG_PATH" in reporte
     assert "JAX_AUDIT_LOG_PATH" in reporte
@@ -567,15 +568,7 @@ def test_verificar_de_punta_a_punta_un_error_de_parseo_tira_todo_abajo():
         "  ALGO_INDENTADO=valor\n"
     )
     import rutas_de_produccion_verificador as mod
-    original_resolver = mod.resolver_como_jaxsvc
-    original_fase_c = mod.verificar_fase_c
-    try:
-        mod.resolver_como_jaxsvc = lambda ruta, ejecutar=None: ruta
-        mod.verificar_fase_c = lambda resolver: mod.ResultadoFaseC()
-        ok, reporte = mod.verificar(texto)
-    finally:
-        mod.resolver_como_jaxsvc = original_resolver
-        mod.verificar_fase_c = original_fase_c
+    ok, reporte = mod.verificar(texto, _ejecutar_de_mentira)
     assert not ok
     assert "línea 4" in reporte
 
@@ -606,22 +599,22 @@ def test_jaxsvc_puede_leer_contra_el_comando_real_no_el_mock():
     motivo = _motivo_de_skip_fuera_de_produccion()
     if motivo:
         pytest.skip(motivo)
-    from rutas_de_produccion_verificador import jaxsvc_puede_leer
-    assert jaxsvc_puede_leer("/srv/jax-prod/jax/config/config.toml") is True
+    from rutas_de_produccion_verificador import _ejecutar_sudo_real, jaxsvc_puede_leer
+    assert jaxsvc_puede_leer("/srv/jax-prod/jax/config/config.toml", _ejecutar_sudo_real) is True
 
 
 def test_jaxsvc_puede_escribir_contra_el_comando_real_no_el_mock():
     motivo = _motivo_de_skip_fuera_de_produccion()
     if motivo:
         pytest.skip(motivo)
-    from rutas_de_produccion_verificador import jaxsvc_puede_escribir
+    from rutas_de_produccion_verificador import _ejecutar_sudo_real, jaxsvc_puede_escribir
     # /srv/jax-data/repo/documents: jaxsvc escribe ahí de verdad
     # (jacobs/executor.py._persist_step_to_repo) -- si esto no existe,
     # el corte de producción de esta tarea no llegó a correr todavía.
     ruta = "/srv/jax-data/repo/documents"
     if not Path(ruta).is_dir():
         pytest.skip(f"{ruta} no existe -- el corte de producción no corrió")
-    assert jaxsvc_puede_escribir(ruta) is True
+    assert jaxsvc_puede_escribir(ruta, _ejecutar_sudo_real) is True
 
 
 def test_jaxsvc_puede_leer_rechaza_ruta_no_absoluta_sin_necesitar_produccion():
@@ -630,17 +623,64 @@ def test_jaxsvc_puede_leer_rechaza_ruta_no_absoluta_sin_necesitar_produccion():
     rechaza ANTES de construir el comando de `test`."""
     from rutas_de_produccion_verificador import jaxsvc_puede_leer
     with pytest.raises(ValueError):
-        jaxsvc_puede_leer("ruta/relativa")
+        jaxsvc_puede_leer("ruta/relativa", _ejecutar_siempre_ok)
 
 
 def test_jaxsvc_puede_leer_da_false_para_ruta_absoluta_inexistente():
-    """Sin mock: una ruta absoluta que no existe da False de verdad (no un
-    error de uso de `test` disfrazado de False)."""
+    """Sin mock: una ruta absoluta que no existe da False de verdad. Desde el
+    2026-10-21 un error de uso de `test` (rc=2, el DEFECTO del `--`) o un sudo
+    que no corre ya no se leen como False sino como ComprobacionImposible, así
+    que este False solo puede venir del «no» real de `test` (rc=1 sin stderr)."""
     motivo = _motivo_de_skip_fuera_de_produccion()
     if motivo:
         pytest.skip(motivo)
+    from rutas_de_produccion_verificador import _ejecutar_sudo_real, jaxsvc_puede_leer
+    assert jaxsvc_puede_leer("/no/existe/de/verdad/2026-09-25", _ejecutar_sudo_real) is False
+
+
+# --- 2026-10-21, auditoría de jax#277 (MINOR-2): «no se pudo comprobar» no es
+# «no puede». Mock puro: corre en cualquier CI.
+# ---------------------------------------------------------------------------
+
+def _ejecutar_con(rc, stderr=""):
+    def ejecutar(argv):
+        from subprocess import CompletedProcess
+        return CompletedProcess(argv, rc, stdout="", stderr=stderr)
+    return ejecutar
+
+
+def test_test_con_error_de_uso_no_es_false():
+    from rutas_de_produccion_verificador import ComprobacionImposible, jaxsvc_puede_leer
+    with pytest.raises(ComprobacionImposible):
+        jaxsvc_puede_leer("/algun/archivo", _ejecutar_con(2, "test: extra argument '--'"))
+
+
+def test_sudo_que_no_corre_no_es_false():
+    from rutas_de_produccion_verificador import ComprobacionImposible, jaxsvc_puede_escribir
+    with pytest.raises(ComprobacionImposible):
+        jaxsvc_puede_escribir("/algun/archivo", _ejecutar_con(1, "sudo: a password is required"))
+
+
+def test_test_que_dice_no_es_false():
     from rutas_de_produccion_verificador import jaxsvc_puede_leer
-    assert jaxsvc_puede_leer("/no/existe/de/verdad/2026-09-25") is False
+    assert jaxsvc_puede_leer("/algun/archivo", _ejecutar_con(1)) is False
+
+
+def test_fase_b_reporta_no_se_pudo_comprobar_distinto_de_no_puede():
+    resultado = verificar_fase_b(ENTORNO_SANO, _ejecutar_con(2, "uso"))
+    assert {h.clave for h in resultado.problemas} == set(KEYS_EN_ALCANCE)
+    assert all("no se pudo comprobar" in h.motivo for h in resultado.problemas)
+    assert not any("no puede" in h.motivo for h in resultado.problemas)
+
+
+# --- 2026-10-21, MINOR-1: el error de parseo no copia el valor de la línea ---
+
+def test_error_de_parseo_no_muestra_el_valor():
+    entorno, errores = parsear_env("  JAX_DB_PASSWORD=secreto-que-no-debe-salir\nX_API_KEY = sk-otro-secreto\n")
+    assert len(errores) == 2
+    for h in errores:
+        assert "secreto" not in h.motivo
+    assert "JAX_DB_PASSWORD" in errores[0].motivo and "X_API_KEY" in errores[1].motivo
 
 
 # --- Ronda 4, MINOR-6: mock puro (corre en CUALQUIER CI, sin sudo/jaxsvc) --
@@ -765,14 +805,6 @@ def test_verificar_de_punta_a_punta_con_ruta_relativa_no_revienta():
         "JAX_REPO_BASE=/srv/jax-data/repo\n"
     )
     import rutas_de_produccion_verificador as mod
-    original_resolver = mod.resolver_como_jaxsvc
-    original_fase_c = mod.verificar_fase_c
-    try:
-        mod.resolver_como_jaxsvc = lambda ruta, ejecutar=None: ruta
-        mod.verificar_fase_c = lambda resolver: mod.ResultadoFaseC()
-        ok, reporte = mod.verificar(texto)  # no debe lanzar
-    finally:
-        mod.resolver_como_jaxsvc = original_resolver
-        mod.verificar_fase_c = original_fase_c
+    ok, reporte = mod.verificar(texto, _ejecutar_de_mentira)  # no debe lanzar
     assert not ok
     assert "absoluta" in reporte

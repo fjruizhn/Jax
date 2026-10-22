@@ -218,8 +218,8 @@
       "mensaje": "PISO ROTO: se esperaban 4 tests CORRIDOS."
     },
     "rutas-de-produccion-fuera-del-checkout-de-trabajo/rutas_de_produccion": {
-      "patron": "^56 passed, 4 skipped",
-      "mensaje": "PISO ROTO: se esperaban 56 tests CORRIDOS (no skipeados) y exactamente 4 skipped (los que sólo corren en el host de producción de jax: test_verificar_rutas_de_produccion_da_cero_en_produccion y tres de jaxsvc_puede_leer/escribir contra el comando real). Si el número de skipped baja, revisar antes de asumir que el piso subió -- este runner podría tener /srv/jax-prod/jax."
+      "patron": "^62 passed, 4 skipped",
+      "mensaje": "PISO ROTO: se esperaban 62 tests CORRIDOS (no skipeados) y exactamente 4 skipped (los que sólo corren en el host de producción de jax: test_verificar_rutas_de_produccion_da_cero_en_produccion y tres de jaxsvc_puede_leer/escribir contra el comando real). Si el número de skipped baja, revisar antes de asumir que el piso subió -- este runner podría tener /srv/jax-prod/jax."
     }
   },
   "minimos": {

@@ -4906,7 +4906,7 @@ Son las pruebas de `las_manos/_server_audit_log_entorno_test.py`: sin `JAX_AUDIT
 
 ## `rutas-de-produccion-fuera-del-checkout-de-trabajo/rutas_de_produccion`
 
-Patrón: `^56 passed, 4 skipped`. Nació en jax#277 y llegó a `ci/pisos.json` el 2026-10-21.
+Patrón: `^62 passed, 4 skipped`. Nació en jax#277 y llegó a `ci/pisos.json` el 2026-10-21.
 Cuenta `tests/test_rutas_de_produccion.py` más `tests/test_rutas_de_produccion_verificador.py`.
 Las 4 saltadas solo corren en el host de producción de jax (si existe `/srv/jax-prod/jax`):
 `test_verificar_rutas_de_produccion_da_cero_en_produccion` y las tres que llaman al
@@ -4920,5 +4920,12 @@ Las 4 saltadas solo corren en el host de producción de jax (si existe `/srv/jax
   `verificar_fase_a` tenía un default que corría `sudo` real para `realpath -m`, y una prueba no
   lo reemplazaba. Ahora el parámetro es obligatorio (`e49e29b0`) y el número no cambia.
   Comprobado en hall9000 con un `sudo` que siempre falla al frente del PATH, como en el runner:
-  57 passed y 3 fallidas. Las 3 fallidas son de las que el runner salta; la cuarta saltada falla en
-  esa copia solo porque no es un checkout de git.
+  57 passed y 3 fallidas, que son 3 de las 4 que el runner salta. La cuarta
+  (`test_jaxsvc_puede_leer_da_false_para_ruta_absoluta_inexistente`) pasaba igual con ese `sudo`
+  falso: no distinguía un «no» de `test` de un error (auditoría de jax#277, MINOR-2).
+- 2026-10-21, auditoría de escalón 3 de jax#277: 56 -> 62 (+6). Entran el caso 6 partido en dos
+  (`JAX_WORKSPACE_DIR` ya no es excepción: bajo /home falla, en /srv/jax-data pasa) y 4 pruebas de
+  «no se pudo comprobar» frente a «no puede» (rc=2 de `test`, sudo con stderr, rc=1 limpio y Fase
+  B), más 1 de que un error de parseo no muestra el valor de la línea. Las saltadas siguen en 4.
+  Local, con el `sudo` falso al frente del PATH: 63 passed y 3 fallidas, las 3 de las 4 que el
+  runner salta; con sudo real en hall9000: 66 passed.

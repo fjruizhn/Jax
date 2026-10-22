@@ -78,7 +78,7 @@ secciones correspondientes de este documento, más abajo -- el documento
 completo queda actualizado para la PRÓXIMA vez que haga falta (reversión,
 u otro corte de esta naturaleza), no sólo como bitácora de lo ya hecho.
 
-**Ronda 4, MAJOR-1(a):** la marca `~/rutas-prod.paso4-completo` (que R3 de
+**Ronda 4, MAJOR-1(a):** la marca `$MARCAS/rutas-prod.paso4-completo` (que R3 de
 la Reversión exige, ver más abajo) no existía en el host real, porque se
 agregó a este runbook DESPUÉS del corte -- Paso 4 nunca la escribió
 retroactivamente. **Hyde la creó a mano en hall9000** con el texto
@@ -87,6 +87,20 @@ retroactivamente. **Hyde la creó a mano en hall9000** con el texto
 marca no salió de una ejecución real del Paso 4, sino de una verificación
 posterior (el sha256 de 64/64 archivos, ya reportado arriba) traducida a la
 misma marca que el runbook espera.
+
+**Estado al 2026-10-21 (Hyde, al integrar master):**
+- Las marcas siguen ahí y con el contenido del corte: TS=`20260925-054909`, N0=`1501` y la marca
+  retroactiva del Paso 4. Desde ese día viven en `/home/fruiz/admin-ecosistema/jax-rutas-produccion/` (ver la Convención).
+- El respaldo `/etc/jax/.env.backup-pre-rutas-de-produccion-20260925-054909` existe.
+- `/etc/jax/.env` cambió después del corte: se modificó el 2026-10-15. Por eso R4 ya no
+  restaura el archivo entero, solo las tres claves (auditoría de jax#277, MAJOR-2).
+- `--verificar` contra producción da rc=0 con 9 claves revisadas.
+- Producción corre `/srv/jax-prod/jax` en `e9895512` (master, PR #366, 2026-10-06). Ese
+  commit **no** contiene esta rama: todavía tiene el
+  `os.getenv("JAX_AUDIT_LOG_PATH", SERVER_CFG["audit_log"])`.
+- La reparación de ACLs de abajo sigue **sin ejecutar**. Hoy jaxsvc lee los 64 archivos de
+  `/srv/jax-data/repo` salvo 2, y los dos son de `documents/.claude-flow/` (estado de una
+  herramienta de agentes, no datos de JAX). Ningún archivo tiene acceso `other`.
 
 ## Pendiente de esta ronda — reparación de ACLs (MINOR-3, MINOR-4)
 
@@ -201,6 +215,12 @@ propio, detrás de que B9 tenga sus tablas.
 sólo LEE `/etc/jax/.env` y el estado real del sistema, no necesita estar
 "instalado" en ningún lado en particular.
 
+**Actualización 2026-10-21:** las tablas de B9 se crearon en producción el 2026-09-25
+(Codex, 11:08; Hyde verificó el `SELECT` a las 22:40, ver claude-skills/PENDIENTES.md).
+`/srv/jax-prod/jax` avanzó después por su cuenta y hoy está en `e9895512` (master, PR #366).
+La advertencia de abajo es historia. Lo que sigue vigente: este código entra a producción
+solo con un despliegue propio, con su GO, y no como efecto colateral de integrarlo.
+
 > ⚠️ **Advertencia explícita para quien despliegue esta rama más adelante:**
 > avanzar `/srv/jax-prod/jax` al HEAD de esta rama (o de `master` una vez
 > mergeada) despliega B9 sin sus tablas. Ese despliegue espera su propio
@@ -240,13 +260,10 @@ Verificado con grep completo sobre `/srv/jax-prod/jax` y
 
 - **`JAX_MISSIONS_DIR` / `JAX_BIN`** -- ver arriba. Pendiente, decisión de
   Fernando.
-- **Los 4 defaults silenciosos de `JAX_WORKSPACE_DIR`** (verificado
-  2026-09-25): `procesamiento/extractores/ocr.py:76`, `jacobs/executor.py:123`,
-  `las_manos/motor_registry/tool_authority.py:64`,
-  `jax/muscles/subprocess_muscle.py:55`. `JAX_WORKSPACE_DIR` SÍ está puesta
-  hoy en `/etc/jax/.env` (se queda ahí, decisión de diseño), así que ninguno
-  cae al default en producción hoy -- pero el default sigue vivo en el
-  código. Fuera de alcance de esta tarea.
+- **`JAX_WORKSPACE_DIR`.** El 2026-09-25 vivía bajo `/home/fruiz/jax-workspace`, con cuatro
+  defaults silenciosos en el código, y el verificador la eximía del chequeo de `/home`. Desde el
+  2026-10-03 (master) no tiene default (falla cerrado) y vive en `/srv/jax-data/jax-workspace`.
+  El 2026-10-21 el verificador dejó de eximirla, y hoy la revisa como a cualquier otra clave de ruta.
 - **`/var/log/jax` sin logrotate.** `AuditLog` sólo hace `open(..., "a")`,
   nunca rota ni trunca. Pendiente aparte.
 - **`fruiz` pierde lectura directa (sin `sudo`) del audit log nuevo.**
@@ -264,9 +281,14 @@ Verificado con grep completo sobre `/srv/jax-prod/jax` y
 | `jax-memory-synthesis.timer` | 04:30:00 en punto, todos los días | `OnCalendar=*-*-* 04:30:00`, sin margen aleatorio |
 | `jax-limpiar-bases-de-test.timer` | ~00:00-00:15 | `OnCalendar=daily` + `RandomizedDelaySec=15m` |
 | `jax-revisar-indice-vectorial.timer` | lunes ~06:30-06:50 | `OnCalendar=Mon *-*-* 06:30:00` + `RandomizedDelaySec=20m` |
+| `jax-memory-embedding.timer` | :00, :20 y :40 | `OnCalendar=*:0/20` (agregado 2026-10-21, `systemctl list-timers`) |
+| `jax-memory-vector-health.timer` | cada hora en punto | `OnCalendar=hourly` (agregado 2026-10-21) |
+| `jax-memory-lifecycle.timer` | 00:00 | `OnCalendar=daily` (agregado 2026-10-21) |
+| `jax-catalogo-modelos.timer` | ~cada hora, observado en :00-:01 | agregado 2026-10-21; revisar su unidad antes de cortar |
 
-Ninguno lee las tres claves que este cambio mueve -- es prudencia, no
-correctitud. **Ventana recomendada, cada hora:** minuto **12 a 28** de cada
+Ninguno de los cuatro originales lee las tres claves que este cambio
+mueve -- es prudencia, no correctitud. Los cuatro agregados el 2026-10-21 no
+se revisaron contra esas claves: comprobarlo antes del próximo corte. **Ventana recomendada, cada hora:** minuto **12 a 28** de cada
 bloque de 20 (`HH:12`–`HH:28`, `HH:32`–`HH:48`, `HH:52`–`HH:08` del
 siguiente bloque). Evitar además **04:25–04:35** y, si el corte cae un
 lunes, **06:25–06:55**. Ventana de tráfico bajo para `jax-platform`.
@@ -290,17 +312,24 @@ las credenciales del archivo al entorno de esa sesión, no sólo las dos que
 hacen falta).
 
 **Las variables que cruzan de un bloque a otro se persisten en archivos**
-(`~/rutas-prod.TS`, `~/rutas-prod.N0`), nunca en variables de shell: cada
-bloque puede correr en una sesión SSH distinta.
+(`rutas-prod.TS`, `rutas-prod.N0`, `rutas-prod.paso4-completo`), nunca en
+variables de shell: cada bloque puede correr en una sesión SSH distinta.
+Viven en `MARCAS=/home/fruiz/admin-ecosistema/jax-rutas-produccion`, ruta absoluta que cada bloque declara al
+empezar. Hasta el 2026-10-21 vivían sueltas en `~/`. Ese día se ordenó el
+home de hall9000 y se movieron a esa carpeta (índice en su `LEEME.md`), y la
+Reversión dejó de encontrarlas (auditoría de jax#277, MAJOR-1). **No se
+mueven ni se borran mientras exista la posibilidad de revertir este corte.**
 
 ## Paso 0 — antes de la ventana (servicios siguiendo corriendo)
 
 ```bash
 (
 set -euo pipefail
+MARCAS=/home/fruiz/admin-ecosistema/jax-rutas-produccion
+mkdir -p "$MARCAS"
 
-date +%Y%m%d-%H%M%S > ~/rutas-prod.TS
-TS="$(cat ~/rutas-prod.TS)"
+date +%Y%m%d-%H%M%S > $MARCAS/rutas-prod.TS
+TS="$(cat $MARCAS/rutas-prod.TS)"
 echo "TS=$TS"
 
 if diff <(sudo cat /srv/jax-prod/jax/config/config.toml) <(cat /home/fruiz/jax/config/config.toml) > /tmp/diff-config-$$; then
@@ -350,10 +379,11 @@ el Paso 5, con los servicios YA detenidos.
 ```bash
 (
 set -euo pipefail
+MARCAS=/home/fruiz/admin-ecosistema/jax-rutas-produccion
 
 # Relee TS de archivo -- este bloque puede correr en una sesión SSH nueva,
 # sin la variable del Paso 0 en memoria.
-TS="$(cat ~/rutas-prod.TS)"
+TS="$(cat $MARCAS/rutas-prod.TS)"
 
 sudo cp -p /etc/jax/.env "/etc/jax/.env.backup-pre-rutas-de-produccion-${TS}"
 sudo chown root:root "/etc/jax/.env.backup-pre-rutas-de-produccion-${TS}"
@@ -436,6 +466,7 @@ systemctl is-active jax-las-manos jax-platform   # esperar "inactive" en las dos
 ```bash
 (
 set -euo pipefail
+MARCAS=/home/fruiz/admin-ecosistema/jax-rutas-produccion
 
 sudo rsync -aHAX --numeric-ids --delete /home/fruiz/jax/repo/ /srv/jax-data/repo/
 
@@ -473,7 +504,7 @@ fi
 # adivinar si el rsync final había corrido mirando si /srv/jax-data/repo
 # existía, y ese directorio también lo crea el Paso 0 (con mkdir, aunque ya
 # no con una copia de adelanto -- ver ronda 4, MAJOR-3).
-date +%Y%m%d-%H%M%S > ~/rutas-prod.paso4-completo
+date +%Y%m%d-%H%M%S > $MARCAS/rutas-prod.paso4-completo
 )
 ```
 
@@ -482,11 +513,12 @@ date +%Y%m%d-%H%M%S > ~/rutas-prod.paso4-completo
 ```bash
 (
 set -euo pipefail
+MARCAS=/home/fruiz/admin-ecosistema/jax-rutas-produccion
 
 # N0 se ancla ACÁ: los servicios ya están detenidos (Paso 3), el archivo de
 # trabajo está quieto. Anclarlo antes (Paso 0) habría contado de más
 # cualquier tráfico real entre ese momento y el corte.
-wc -l < /home/fruiz/jax/las_manos/logs/audit.jsonl | tee ~/rutas-prod.N0
+wc -l < /home/fruiz/jax/las_manos/logs/audit.jsonl | tee $MARCAS/rutas-prod.N0
 
 sudo cp -p /home/fruiz/jax/las_manos/logs/audit.jsonl /var/log/jax/las_manos/audit.jsonl
 sudo chown jaxsvc:jaxsvc /var/log/jax/las_manos/audit.jsonl
@@ -688,21 +720,33 @@ usar `chmod a-w` ahí también y anotarlo en el registro de esta tarea.
 ## Reversión
 
 **Adaptativa (ronda 2, MINOR): cada paso comprueba si el correspondiente
-paso de ida llegó a correr, y se salta solo si no.** Si el corte falló
-temprano (antes del Paso 5), no hay `~/rutas-prod.N0` -- R2 no aplica. Si
-falló antes del Paso 4, no hay nada nuevo en `/srv/jax-data/repo` que
-sincronizar de vuelta -- R3 no aplica.
+paso de ida llegó a correr, y se salta solo si hay EVIDENCIA de que no
+corrió.** Si el corte falló temprano (antes del Paso 5), no hay
+`$MARCAS/rutas-prod.N0` ni audit log nuevo -- R2 no aplica. Si falló antes
+del Paso 4, `/srv/jax-data/repo` está vacío -- R3 no aplica. **Que falte
+una marca no prueba que el paso no corrió** (2026-10-21, auditoría de
+jax#277, MAJOR-1: las marcas se movieron de carpeta y R2/R3 se habrían
+saltado en silencio): si falta la marca pero el efecto del paso está a la
+vista, el bloque ABORTA. «No se sabe» nunca se trata como «no corrió».
 
-**Toda la secuencia de abajo (preámbulo + R1-R5) se probó de punta a punta
+**La secuencia (preámbulo + R1-R5) se probó de punta a punta el 2026-09-25
 en `/tmp`, con `sudo unshare --mount`, reproduciendo el estado real
-posterior al corte** (incluido el `chattr +i` del Paso 9 -- eso sólo se
-puede probar con root de verdad, no con un mock) -- ver la evidencia en el
-informe de esta ronda.
+posterior al corte** (incluido el `chattr +i` del Paso 9). **Los cambios del
+2026-10-21** (MARCAS, aborto ante «no se sabe» en R2/R3, R4 solo con tres
+claves) se probaron sin root, con las rutas cambiadas a un directorio
+temporal y `sudo` reemplazado por una función que ejecuta sin privilegios:
+eso prueba la lógica de cada rama, no los permisos. La próxima vez que haga
+falta revertir, ensayar antes con `unshare` como el 25-sep.
 
 ```bash
 (
 set -euo pipefail
-TS="$(cat ~/rutas-prod.TS)"
+MARCAS=/home/fruiz/admin-ecosistema/jax-rutas-produccion
+if [ ! -f "$MARCAS/rutas-prod.TS" ]; then
+  echo "ABORTAR REVERSION: no existe $MARCAS/rutas-prod.TS -- sin el sello del corte no se sabe que respaldo restaurar ni que pasos corrieron"
+  exit 1
+fi
+TS="$(cat "$MARCAS/rutas-prod.TS")"
 BACKUP="/etc/jax/.env.backup-pre-rutas-de-produccion-${TS}"
 if [ ! -f "$BACKUP" ]; then
   echo "ABORTAR REVERSION: no existe $BACKUP -- no hay de donde restaurar"
@@ -742,15 +786,19 @@ sudo systemctl stop jax-las-manos jax-platform
 ```bash
 (
 set -euo pipefail
+MARCAS=/home/fruiz/admin-ecosistema/jax-rutas-produccion
 OLD=/home/fruiz/jax/las_manos/logs/audit.jsonl
 NEW=/var/log/jax/las_manos/audit.jsonl
 
-if [ ! -f ~/rutas-prod.N0 ]; then
-  echo "R2: no existe ~/rutas-prod.N0 -- el Paso 5 nunca corrio, nada que anexar"
-elif [ ! -f "$NEW" ]; then
-  echo "R2: $NEW no existe -- el Paso 5 nunca corrio, nada que anexar"
+if [ ! -f "$NEW" ]; then
+  echo "R2: $NEW no existe -- el Paso 5 nunca copio el audit log, nada que anexar"
+elif [ ! -f "$MARCAS/rutas-prod.N0" ]; then
+  # El Paso 5 escribe N0 ANTES de copiar: audit log nuevo sin N0 no es
+  # «el Paso 5 no corrio», es «no se sabe» -- y no se adivina.
+  echo "ABORTAR: $NEW existe pero falta $MARCAS/rutas-prod.N0 -- no se sabe hasta donde anexar"
+  exit 1
 else
-  N0="$(cat ~/rutas-prod.N0)"
+  N0="$(cat "$MARCAS/rutas-prod.N0")"
   if sudo cmp -s "$OLD" "$NEW"; then
     # Idempotente: si esto es una reversion REPETIDA (o nunca hubo
     # escrituras nuevas desde el corte), OLD y NEW ya coinciden -- anexar
@@ -788,13 +836,14 @@ MINOR-3):**
 ```bash
 (
 set -euo pipefail
-# La marca de ~/rutas-prod.paso4-completo (NO sólo "existe /srv/jax-data/repo",
+MARCAS=/home/fruiz/admin-ecosistema/jax-rutas-produccion
+# La marca de $MARCAS/rutas-prod.paso4-completo (NO sólo "existe /srv/jax-data/repo",
 # que también crea el Paso 0 con un mkdir vacío) confirma que el ÚNICO
 # rsync del repo (Paso 4, ronda 4: ya no hay una pasada de adelanto en el
 # Paso 0) de verdad corrió -- si el corte falló antes del Paso 4,
 # /srv/jax-data/repo existe pero vacío o con datos parciales, y
 # sincronizarlos de vuelta sería un error.
-if [ -f ~/rutas-prod.paso4-completo ]; then
+if [ -f "$MARCAS/rutas-prod.paso4-completo" ]; then
   # --ignore-existing (ronda 4, MAJOR-3): NUNCA toca un archivo que ya
   # existe en el destino (/home/fruiz/jax/repo), aunque el contenido sea
   # igual -- sólo trae lo genuinamente NUEVO. Reemplaza a -u (--update):
@@ -806,31 +855,80 @@ if [ -f ~/rutas-prod.paso4-completo ]; then
   # el archivo, salió intacto.
   sudo rsync -aHAX --ignore-existing --numeric-ids /srv/jax-data/repo/ /home/fruiz/jax/repo/
   echo "R3 OK: sincronizado de vuelta (sólo lo nuevo; nada preexistente se tocó)"
+elif [ -z "$(sudo find /srv/jax-data/repo -mindepth 1 -print -quit 2>/dev/null)" ]; then
+  echo "R3: no existe $MARCAS/rutas-prod.paso4-completo y /srv/jax-data/repo esta vacio -- el Paso 4 nunca corrio, nada que sincronizar"
 else
-  echo "R3: no existe ~/rutas-prod.paso4-completo -- el Paso 4 nunca terminó, nada confiable que sincronizar"
+  echo "ABORTAR: falta $MARCAS/rutas-prod.paso4-completo pero /srv/jax-data/repo tiene datos -- no se sabe si el Paso 4 termino; revisar a mano"
+  exit 1
 fi
 )
 ```
 
-**R4 — restaurar `.env`, con la misma disciplina de permisos del Paso 6:**
+**R4 — devolver SOLO las tres claves del corte a su valor del respaldo, con la
+misma disciplina del Paso 6 (2026-10-21, auditoría de jax#277, MAJOR-2):**
+
+Antes R4 copiaba el respaldo entero encima de `/etc/jax/.env`. Eso borraba en
+silencio todo lo que cambió en el `.env` después del corte (el 2026-10-15 ya
+había cambiado): claves nuevas que un servicio exige y credenciales rotadas.
+Ahora se toma el `.env` vivo y solo `JAX_CONFIG_PATH`, `JAX_AUDIT_LOG_PATH` y
+`JAX_REPO_BASE` vuelven al valor que tienen en el respaldo. El diff tiene que
+dar exactamente esas tres claves, igual que en el Paso 6.
 
 ```bash
 (
 set -euo pipefail
-TS="$(cat ~/rutas-prod.TS)"
+MARCAS=/home/fruiz/admin-ecosistema/jax-rutas-produccion
+TS="$(cat "$MARCAS/rutas-prod.TS")"
 BACKUP="/etc/jax/.env.backup-pre-rutas-de-produccion-${TS}"
 [ -f "$BACKUP" ] || { echo "ABORTAR: no existe $BACKUP"; exit 1; }
 
-sudo sh -c "umask 077; cp -p '$BACKUP' /etc/jax/.env.restaurado"
-sudo chown root:jaxsvc /etc/jax/.env.restaurado
-sudo chmod 640 /etc/jax/.env.restaurado
-sudo mv /etc/jax/.env.restaurado /etc/jax/.env
+# python3 -I: no carga nada del directorio actual. Lee los dos archivos como
+# root y escribe el temporal con umask 077; no imprime ningun valor (las tres
+# rutas, que no son secretas, se ven en el diff de abajo).
+sudo python3 -I -c '
+import os, re, sys
+CLAVES = ("JAX_CONFIG_PATH", "JAX_AUDIT_LOG_PATH", "JAX_REPO_BASE")
+respaldo = open(sys.argv[1], encoding="utf-8").read()
+vivo = open("/etc/jax/.env", encoding="utf-8").read()
+viejas = {}
+for c in CLAVES:
+    r = [l for l in respaldo.splitlines() if l.startswith(c + "=")]
+    v = [l for l in vivo.splitlines() if l.startswith(c + "=")]
+    if len(r) != 1 or len(v) != 1:
+        sys.exit(f"ABORTAR: {c} aparece {len(r)} vez/veces en el respaldo y {len(v)} en el vivo; se esperaba 1 y 1")
+    viejas[c] = r[0]
+salida = [next((viejas[c] for c in CLAVES if l.startswith(c + "=")), l) for l in vivo.split("\n")]
+os.umask(0o077)
+with open("/etc/jax/.env.tmp", "w", encoding="utf-8") as f:
+    f.write("\n".join(salida))
+' "$BACKUP"
+sudo chown root:jaxsvc /etc/jax/.env.tmp
+sudo chmod 640 /etc/jax/.env.tmp
+MODO_TMP="$(sudo stat -c "%U:%G %a" /etc/jax/.env.tmp)"
+if [ "$MODO_TMP" != "root:jaxsvc 640" ]; then
+  echo "ABORTAR: /etc/jax/.env.tmp no quedo root:jaxsvc 640 (quedo: $MODO_TMP)"
+  sudo rm -f /etc/jax/.env.tmp
+  exit 1
+fi
+
+DIFF_TMP="$(diff -U0 <(sudo cat /etc/jax/.env) <(sudo cat /etc/jax/.env.tmp) || true)"
+echo "$DIFF_TMP"
+N_LINEAS_DE_CAMBIO="$(printf '%s\n' "$DIFF_TMP" | grep -cE '^[+-][^+-]' || true)"
+FUERA_DE_LAS_3="$(printf '%s\n' "$DIFF_TMP" | grep -E '^[+-][^+-]' | grep -cvE '^[+-]JAX_(CONFIG_PATH|AUDIT_LOG_PATH|REPO_BASE)=' || true)"
+if [ "$N_LINEAS_DE_CAMBIO" -ne 6 ] || [ "$FUERA_DE_LAS_3" -ne 0 ]; then
+  echo "ABORTAR: el diff tiene $N_LINEAS_DE_CAMBIO lineas de cambio ($FUERA_DE_LAS_3 fuera de las 3 claves); se esperaban exactamente 6, todas de las 3 claves."
+  sudo rm -f /etc/jax/.env.tmp
+  exit 1
+fi
+echo "diff OK: exactamente las 3 claves vuelven a su valor del respaldo, nada mas"
+
+sudo mv /etc/jax/.env.tmp /etc/jax/.env
 MODO_FINAL="$(sudo stat -c "%U:%G %a" /etc/jax/.env)"
 if [ "$MODO_FINAL" != "root:jaxsvc 640" ]; then
   echo "ABORTAR: /etc/jax/.env no quedo root:jaxsvc 640 tras restaurar (quedo: $MODO_FINAL)"
   exit 1
 fi
-echo "/etc/jax/.env restaurado: $MODO_FINAL"
+echo "/etc/jax/.env: 3 claves restauradas, $MODO_FINAL"
 )
 ```
 
