@@ -335,6 +335,49 @@ async def test_office_root_list_index_definition_drift_fails_closed_and_rollback
 
 @requires_test_db
 @_async
+async def test_office_root_list_prefix_index_drift_fails_closed_and_rollback_preserves_it():
+    """Prefix keys match names and columns, but not the bounded list contract."""
+    name = f"{_DB}_office_index_prefix_{uuid.uuid4().hex[:10]}"
+    assert es_base_de_test(name)
+    await _setup(name)
+    conn = await aiomysql.connect(
+        db=name, autocommit=True, cursorclass=aiomysql.DictCursor,
+        connect_timeout=db_connect_timeout_seconds(), **_params())
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "DROP INDEX idx_jax_project_scope_namespace_status_project ON jax_project_scope")
+            await cur.execute(
+                "CREATE INDEX idx_jax_project_scope_namespace_status_project "
+                "ON jax_project_scope (authorization_namespace(1), status(1), project_id)")
+
+            async def index_parts():
+                await cur.execute(
+                    "SELECT COLUMN_NAME,SUB_PART FROM information_schema.STATISTICS "
+                    "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='jax_project_scope' "
+                    "AND INDEX_NAME='idx_jax_project_scope_namespace_status_project' "
+                    "ORDER BY SEQ_IN_INDEX")
+                return tuple((row["COLUMN_NAME"], row["SUB_PART"]) for row in await cur.fetchall())
+
+            expected_prefix = (("authorization_namespace", 1), ("status", 1), ("project_id", None))
+            assert await index_parts() == expected_prefix
+            await cur.execute("SHOW CREATE TABLE jax_project_scope")
+            before = (await cur.fetchone())["Create Table"]
+            with pytest.raises(RuntimeError, match="unexpected definition"):
+                await apply_project_authority_migration(cur)
+            assert await index_parts() == expected_prefix
+            await cur.execute("SHOW CREATE TABLE jax_project_scope")
+            assert (await cur.fetchone())["Create Table"] == before
+            with pytest.raises(RuntimeError, match="unexpected definition"):
+                await revert_project_lifecycle_migration(cur)
+            assert await index_parts() == expected_prefix
+    finally:
+        conn.close()
+        await _drop(name)
+
+
+@requires_test_db
+@_async
 async def test_office_same_key_concurrency_creates_one_project_and_stable_replay():
     """Catches duplicate-key handling that leaves concurrent retries failing."""
     name = f"{_DB}_office_{uuid.uuid4().hex[:10]}"

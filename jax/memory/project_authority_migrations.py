@@ -187,7 +187,7 @@ async def _index_shape(cursor: Any, table: str, name: str,
     """Return ``absent``, ``exact``, or ``drifted`` for a managed index.
 
     Index names are part of this migration's schema contract.  Treating a
-    same-name index with another order, type, uniqueness, or ignored state as
+    same-name index with another order, prefix length, type, uniqueness, or ignored state as
     installed would silently defeat a bounded Office list; replacing it would
     mutate an index this migration does not own.  MariaDB versions before the
     ``IGNORED`` metadata column are handled without selecting that column.
@@ -197,7 +197,7 @@ async def _index_shape(cursor: Any, table: str, name: str,
         "WHERE TABLE_SCHEMA='information_schema' AND TABLE_NAME='STATISTICS' "
         "AND COLUMN_NAME='IGNORED'")
     has_ignored_metadata = _scalar(await cursor.fetchone()) > 0
-    select = "COLUMN_NAME,NON_UNIQUE,INDEX_TYPE"
+    select = "COLUMN_NAME,SUB_PART,NON_UNIQUE,INDEX_TYPE"
     if has_ignored_metadata:
         select += ",IGNORED"
     await cursor.execute(
@@ -208,14 +208,15 @@ async def _index_shape(cursor: Any, table: str, name: str,
     if not rows:
         return "absent"
     actual_columns = tuple(str(_field(row, "COLUMN_NAME", 0)) for row in rows)
-    btree_non_unique = all(
-        int(_field(row, "NON_UNIQUE", 1)) == 1
-        and str(_field(row, "INDEX_TYPE", 2)).upper() == "BTREE"
+    btree_non_unique_full_columns = all(
+        _field(row, "SUB_PART", 1) is None
+        and int(_field(row, "NON_UNIQUE", 2)) == 1
+        and str(_field(row, "INDEX_TYPE", 3)).upper() == "BTREE"
         for row in rows)
     not_ignored = (not has_ignored_metadata or all(
-        str(_field(row, "IGNORED", 3)).upper() in ("", "0", "NO", "FALSE")
+        str(_field(row, "IGNORED", 4)).upper() in ("", "0", "NO", "FALSE")
         for row in rows))
-    return "exact" if actual_columns == columns and btree_non_unique and not_ignored else "drifted"
+    return "exact" if actual_columns == columns and btree_non_unique_full_columns and not_ignored else "drifted"
 
 
 async def _column_type(cursor: Any, table: str, column: str) -> str | None:
