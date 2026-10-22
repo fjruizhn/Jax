@@ -90,6 +90,10 @@ class _CheckReadError(Exception):
 _CheckReadError.__module__ = "pymysql.err"
 
 
+class _Application1020Error(Exception):
+    pass
+
+
 class DuplicateStore:
     def __init__(self): self.mutations = 0
     async def mutation(self, _operation):
@@ -97,16 +101,26 @@ class DuplicateStore:
         raise _DuplicateKeyError(1062, "unrelated unique constraint")
 
 
-class CheckReadThenStore:
-    def __init__(self, rows):
+class CheckReadStore:
+    def __init__(self, rows, *, failures=1):
         self.cursor = Cursor(rows)
+        self.failures = failures
         self.mutations = 0
 
     async def mutation(self, operation):
         self.mutations += 1
-        if self.mutations == 1:
-            raise _CheckReadError(1020, "record changed")
+        if self.mutations <= self.failures:
+            raise _CheckReadError(1020, "driver record changed")
         return await operation(self.cursor)
+
+
+class Application1020Store:
+    def __init__(self):
+        self.mutations = 0
+
+    async def mutation(self, _operation):
+        self.mutations += 1
+        raise _Application1020Error(1020, "application record changed")
 
 
 def test_office_namespace_contract_marker_identifies_the_reviewed_resolver_contract():
@@ -365,11 +379,33 @@ async def test_namespaced_creation_actor_tenant_drift_exhaustion_is_stable_retry
 
 @pytest.mark.asyncio
 async def test_namespaced_creation_checkread_retries_with_a_fresh_transaction():
-    store = CheckReadThenStore([{"tenant_id": 4}, {"tenant_id": 4}, {"tenant_id": 4}, None, {"id": 17}])
+    store = CheckReadStore([{"tenant_id": 4}, {"tenant_id": 4}, {"tenant_id": 4}, None, {"id": 17}])
     authorizer = Authorizer()
     result = await ProjectAuthorityAdmin(store).create_namespaced_project(
         actor_user_id=7, target_tenant_id=4, namespace=ProjectNamespace.OFFICE_CONFIDENTIAL,
         name="Office", description=None, idempotency_key=str(uuid.uuid4()), authorizer=authorizer)
     assert result.created and store.mutations == 2
     assert len(authorizer.calls) == 1 and authorizer.calls[0][0] is store.cursor
+
+
+@pytest.mark.asyncio
+async def test_namespaced_creation_checkread_exhaustion_is_static_retryable_without_driver_text():
+    store = CheckReadStore([], failures=5)
+    with pytest.raises(ProjectAuthorityRetryable) as failure:
+        await ProjectAuthorityAdmin(store).create_namespaced_project(
+            actor_user_id=7, target_tenant_id=4, namespace=ProjectNamespace.OFFICE_CONFIDENTIAL,
+            name="Office", description=None, idempotency_key=str(uuid.uuid4()), authorizer=Authorizer())
+    assert store.mutations == 5 and failure.value.code == "reintentar"
+    assert str(failure.value) == "namespace project creation contention, retry"
+    assert "driver record changed" not in str(failure.value)
+
+
+@pytest.mark.asyncio
+async def test_namespaced_creation_does_not_retry_an_application_exception_with_1020_args():
+    store = Application1020Store()
+    with pytest.raises(_Application1020Error, match="application record changed"):
+        await ProjectAuthorityAdmin(store).create_namespaced_project(
+            actor_user_id=7, target_tenant_id=4, namespace=ProjectNamespace.OFFICE_CONFIDENTIAL,
+            name="Office", description=None, idempotency_key=str(uuid.uuid4()), authorizer=Authorizer())
+    assert store.mutations == 1
 

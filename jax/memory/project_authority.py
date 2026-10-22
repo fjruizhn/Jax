@@ -17,10 +17,13 @@ memory reads/writes, H3/H4). It has its own transactional resolver,
     over a project is an explicit OWNER/TENANT_ADMIN membership row, never a
     bypass).
 
-Every mutation here takes `jax_tenants(tenant_id) FOR UPDATE` as its first
-statement (a per-tenant mutex), then locks the ACTOR's own row, then (ronda 3,
-MAJOR M1) any DESTINO row this operation touches. After that the order is NOT
-the same for every operation:
+Every classic mutation here takes `jax_tenants(tenant_id) FOR UPDATE` as its
+first statement (a per-tenant mutex), then locks the ACTOR's own row, then
+(ronda 3, MAJOR M1) any DESTINO row this operation touches. Namespaced Office
+creation first reads the actor's tenant by indexed PK as a non-authorizing
+hint, locks the distinct hinted and target tenant rows in ascending order, and
+then locks/rechecks the actor before authorization. After that the order is
+NOT the same for every operation:
   - `bootstrap_existing_project` locks `projects` BEFORE the scope row:
     `tenant -> actor -> destino -> projects -> scope -> membership -> events`
     (plan section 2.1);
@@ -53,7 +56,8 @@ no sea la del ACTOR o la del DESTINO -- nunca la de un tercero (otro OWNER
 que se está contando, un admin del conjunto que se está leyendo). La
 serialización de cambios a `jax_users.role`/`jax_users.status` la da,
 enteramente, el candado de `jax_tenants(tenant_id) FOR UPDATE` que esta
-transacción ya tomó como primera sentencia: TODO escritor de
+transacción ya tomó antes de bloquear filas de usuario (después del hint
+no bloqueante, para creación Office): TODO escritor de
 `jax_users.role`/`status` (este módulo y la transacción propia de la
 plataforma en `jax_users`, plan sección 4) tiene que tomar ese MISMO candado
 antes de escribir. Bajo esa garantía, leer `jax_users.status`/`role` de un
@@ -249,7 +253,6 @@ _NAMESPACE_CREATE_MAX_CONTENTION_RETRIES = 4
 # actor-tenant hint predates a concurrent idempotency insert.  It is the same
 # fresh-transaction condition as the duplicate replay path, not an authority
 # decision and never leaves effects committed.
-_NAMESPACE_CREATE_FRESH_TRANSACTION_ERRNOS = _RETRYABLE_MYSQL_ERRNOS | frozenset({1020})
 
 
 class _NamespaceCreateActorTenantDrift(Exception):
@@ -790,11 +793,14 @@ class ProjectAuthorityAdmin:
                         "namespace project creation duplicate conflict",
                         code="namespace_creation_conflict") from exc
                 errno = (getattr(exc, "args", ()) or (None,))[0]
-                if errno in _NAMESPACE_CREATE_FRESH_TRANSACTION_ERRNOS and attempt < _NAMESPACE_CREATE_MAX_CONTENTION_RETRIES:
+                checkread = _is_raw_db_error(exc) and errno == 1020
+                if (errno in _RETRYABLE_MYSQL_ERRNOS or checkread) and attempt < _NAMESPACE_CREATE_MAX_CONTENTION_RETRIES:
                     # Yield the event loop before opening a fresh transaction;
                     # the next pass reauthorizes and then reads the winner.
                     await asyncio.sleep(0)
                     return await run(attempt + 1)
+                if checkread:
+                    raise ProjectAuthorityRetryable("namespace project creation contention, retry") from exc
                 raise _wrap_unexpected_db_error(exc) from exc
 
         return await run(0)
