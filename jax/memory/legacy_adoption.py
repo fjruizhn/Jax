@@ -129,7 +129,8 @@ def classify(table,row,users,projects,memberships,refs,*,observed_at):
     if project is not None:
         scope=projects.get(str(project))
         member=memberships.get((str(project),str(uid)))
-        if not scope or str(scope.get("tenant_id"))!=str(tenant) or scope.get("status")!="ACTIVE":
+        if (not scope or str(scope.get("tenant_id"))!=str(tenant) or scope.get("status")!="ACTIVE"
+                or str(scope.get("authorization_namespace", "CLASSIC")).upper()!="CLASSIC"):
             return "PROJECT_SCOPE_UNBOUND",None
         if not member or str(member.get("tenant_id"))!=str(tenant) or member.get("status")!="ACTIVE" or member.get("project_role") not in {"CONTRIBUTOR","REVIEWER","OWNER"}:
             return "PROJECT_MEMBERSHIP_UNAVAILABLE",None
@@ -149,7 +150,12 @@ async def build_plan(raw_pool, namespace):
                 observed=(await cur.fetchone())["observed_at"]
                 await cur.execute("SELECT user_id,tenant_id,status,role FROM jax_users ORDER BY user_id")
                 users={str(r["user_id"]):normalize(r) for r in await cur.fetchall()}
-                await cur.execute("SELECT project_id,tenant_id,status FROM jax_project_scope ORDER BY project_id")
+                # Legacy adoption emits only classic PROJECT_SHARED records.
+                # Office content has its own authority contract and must never
+                # cross into the classic memory namespace.
+                await cur.execute(
+                    "SELECT project_id,tenant_id,status FROM jax_project_scope "
+                    "WHERE authorization_namespace='CLASSIC' ORDER BY project_id")
                 projects={str(r["project_id"]):normalize(r) for r in await cur.fetchall()}
                 await cur.execute("SELECT project_id,user_id,tenant_id,status,project_role FROM jax_project_membership ORDER BY project_id,user_id")
                 members={(str(r["project_id"]),str(r["user_id"])):normalize(r) for r in await cur.fetchall()}

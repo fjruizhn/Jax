@@ -9,7 +9,7 @@ from processing_ownership import ProcessingOwnershipContext
 
 _CONSULTA = (
     "SELECT s.status FROM projects p JOIN jax_project_scope s ON s.project_id = p.id "
-    "WHERE p.project_uuid = %s"
+    "WHERE p.project_uuid = %s AND s.authorization_namespace='CLASSIC'"
 )
 
 
@@ -28,7 +28,7 @@ async def identidad_activa_del_proyecto(project_uuid: str, ownership: Processing
     query = (
         "SELECT p.id, s.tenant_id FROM projects p "
         "JOIN jax_project_scope s ON s.project_id=p.id "
-        "WHERE p.project_uuid=%s AND s.status='ACTIVE'"
+        "WHERE p.project_uuid=%s AND s.status='ACTIVE' AND s.authorization_namespace='CLASSIC'"
     )
     async with jacobs_store.conexion() as conn:
         async with conn.cursor() as cur:
