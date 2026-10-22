@@ -78,3 +78,27 @@ Reglas.
    Esto corrige el texto de la spec.
 5. `objective` no llega a /motor/dispatch: límite declarado, fuera de este PR; va a DEUDA.md.
 6. La huella de `git status` excluye la misma constante de exclusiones.
+
+## Enmienda 2, 2026-10-22 (resultado del banco U4 independiente)
+
+Hecho. El banco U4 independiente (20 casos, a ciegas para quien implementa) corrido contra
+`ba110f58` dio 7/10 marcados (umbral >= 9: NO PASA) y 2/7 controles limpios marcados. Las causas
+llegan sin los casos. Los UMBRALES no cambian. Ese banco queda como CALIBRACIÓN (ya se conocen sus
+causas) y no vuelve a servir de validación; se replantea OTRO banco a ciegas.
+
+Reglas.
+1. Nunca limpio sin fuente. Un candidato `*.service|timer` (campo que afirma o texto libre) es
+   limpio solo si existe una unidad con ese nombre en el repo versionado (cualquier ruta de
+   `git ls-files`, p. ej. config/systemd/ o deploy/); si no, es `no_verificable` (categoría
+   `systemd`: visible, no pasa limpio, no acusa y no falla en duro). No se consulta el gestor de
+   servicios del host: es lo más simple que cumple la regla.
+2. `CANALES_POR_SCHEMA` declara TODOS los campos de TODOS los SCHEMAS, uno por uno, con la regla:
+   lo que dice «hice / leí / existe / encontré / falla» AFIRMA; lo que dice «habría que /
+   recomiendo / riesgo futuro» PROPONE; un campo que mezcla, afirma (fail cerrado). La tabla va
+   en el docstring de `output_validator.py` y una prueba exige que no quede campo sin declarar.
+3. Una ruta seguida de puntuación (punto final, coma, dos puntos, punto y coma, paréntesis,
+   comillas, signos) se compara sin esa puntuación.
+4. `nuevo:` también vale como prefijo de línea o viñeta (`- nuevo: ruta/x.py — ...`): lo que
+   esa línea nombra es propuesto.
+5. `tabla.columna` con tabla real y columna inexistente dentro de un campo que afirma nunca
+   sale limpia; una prueba la ejercita en cada campo declarado como afirma.
