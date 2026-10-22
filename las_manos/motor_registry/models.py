@@ -127,6 +127,12 @@ class MotorJobView(BaseModel):
     # afuera) -- sin este campo, JobStore.get() lo filtraría en silencio
     # igual que filtraba `model` antes de la ronda de arreglo 1 de Task 1.
     pipeline_id: str | None = None
+    # Anti-fabricación (capas 2 y 4, 2026-10-22): estado del veredicto de
+    # estructura de este job (limpio | marcado | no_verificable | no_corrio).
+    # El detalle (`_estructura`, `_unbacked_claims`) queda solo en el JSONL, como
+    # los demás campos privados del worker. None = el job no llegó a ese punto
+    # (falló antes) o es anterior a este campo.
+    estructura_veredicto: str | None = None
     # F2-E: immutable trusted dispatch ownership.  Legacy JSONL events omit
     # these fields and therefore cannot accredit a current status claim.
     tenant_id: str | None = None

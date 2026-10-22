@@ -950,8 +950,12 @@ def test_los_event_append_del_motor_registry_son_await_en_corrutinas_del_loop():
                 assert isinstance(ancestro, ast.AsyncFunctionDef), f"{archivo}:{nodo.lineno} fuera de async def"
             if isinstance(nodo, ast.Call) and getattr(nodo.func, "attr", None) == "to_thread":
                 objetivo = nodo.args[0]
+                # `verificar` (regex puro) y `_auditar_estructura` (append a audit.jsonl) son el
+                # detector anti-fabricacion (2026-10-22): ninguno toca el pool de Jacobs ni crea
+                # un loop; por eso entran en la lista cerrada de lo que puede ir en un hilo.
                 assert getattr(objetivo, "attr", getattr(objetivo, "id", None)) in {
-                    "run", "write_result"}, f"{archivo}:{nodo.lineno} to_thread de {ast.dump(objetivo)}"
+                    "run", "write_result", "verificar", "_auditar_estructura",
+                }, f"{archivo}:{nodo.lineno} to_thread de {ast.dump(objetivo)}"
     assert llamadas == 4  # tool_authority 3 + worker 1
     for ruta in _MOTOR_REGISTRY.glob("*.py"):
         if ruta.name.endswith("_test.py"):

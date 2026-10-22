@@ -239,6 +239,43 @@ class AuditLog:
             **self._forensics(environment, traffic_class, test_run_id),
         })
 
+    def log_estructura(
+        self,
+        *,
+        job_id: str,
+        motor: str,
+        capability: str,
+        pipeline_id: str | None,
+        endpoint: str,
+        trace_id: str | None,
+        modo: str,
+        items: list[dict],
+        items_total: int = 0,
+        usos_nuevo: int = 0,
+        usos_hipotesis: int = 0,
+        environment: str = "production",
+        traffic_class: str = "unknown",
+        test_run_id: str | None = None,
+    ) -> None:
+        """Un job del Motor Registry afirmó estructura sin respaldo (anti-
+        fabricación, capa 4). Se escribe en AMBOS modos (duro y sombra)."""
+        self._write({
+            "event":       "ESTRUCTURA_SIN_RESPALDO",
+            "job_id":      job_id,
+            "motor":       motor,
+            "capability":  capability,
+            "pipeline_id": pipeline_id,
+            "endpoint":    endpoint,    # el punto de entrada REAL del job (no la URL del motor)
+            "trace_id":    trace_id,
+            "modo":        modo,
+            "items":       items,
+            "items_total": items_total,
+            # cuántas veces la salida se escapó por `nuevo:` o por «?» (fase sombra: ¿abuso aprendido?)
+            "usos_nuevo":  usos_nuevo,
+            "usos_hipotesis": usos_hipotesis,
+            **self._forensics(environment, traffic_class, test_run_id),
+        })
+
     def tail(self, n: int = 50) -> list[dict]:
         """Devuelve los últimos N eventos — para /audit_log_read."""
         if not self.log_path.exists():

@@ -9,3 +9,4 @@ This file provides stable operational orientation. It is not canonical or normat
 - For historical narrative, plans, and old checkpoints, use `docs/historia/**` and the historical documentation directories.
 
 Memory and old snapshots may suggest where to inspect, but never establish current truth. Dated snapshots must identify their source, observation time, scope, and deployment/revision identity.
+- For the anti-fabrication structure detector (`jax/anti_fabricacion/`), its `axioma_config` mode key and the required activation order (seed `sombra` BEFORE restarting LAS MANOS), use [the activation runbook](docs/runbooks/anti-fabricacion-activacion.md).

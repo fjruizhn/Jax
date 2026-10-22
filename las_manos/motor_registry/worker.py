@@ -59,6 +59,13 @@ from motor_registry.models import JobStatus
 from interruptor import interruptor_activo
 from motor_registry.output_validator import validate
 from motor_registry.tools_catalog import TOOLS_CATALOG
+# Anti-fabricación (capas 2 y 4). Import PELADO: `las_manos/anti_fabricacion` es un
+# symlink a `jax/anti_fabricacion`, igual que `jacobs`; LAS MANOS corre con
+# cwd=las_manos/, donde `jax.` no es importable. Los tests parchean los atributos
+# de estos módulos (no copias locales): por eso se usan como módulo.
+from anti_fabricacion import consecuencia as _af_consecuencia
+from anti_fabricacion import estructura as _af_estructura
+from anti_fabricacion import whitelist as _af_whitelist
 
 logger = logging.getLogger(__name__)
 
@@ -423,6 +430,82 @@ async def _notify_failed_with_writes(*, job_id: str, files_written: list[dict], 
         logger.error("job %s: notificación de fallo-con-escrituras no se pudo entregar: %s", job_id, result["error"])
 
 
+async def _notify_estructura(*, job_id: str, motor: str, capability: str, pipeline_id: str | None,
+                             veredicto, modo) -> None:
+    """Aviso INMEDIATO de un job con estructura sin respaldo (ambos modos)."""
+    from jacobs.reaper import send_telegram_alert
+    message = _af_consecuencia.mensaje_aviso(
+        job_id=job_id, motor=motor, capability=capability, veredicto=veredicto, modo=modo, pipeline_id=pipeline_id)
+    result = await send_telegram_alert(message)
+    if not result["ok"]:
+        logger.error("job %s: aviso de estructura sin respaldo no se pudo entregar: %s", job_id, result["error"])
+
+
+_ahora = time.monotonic   # costura de prueba: el reloj del enfriamiento de avisos
+#: Enfriamiento de avisos (MINOR 8): un detector caído afecta a TODOS los jobs; un aviso por
+#: motivo y por ventana, no uno por job. Estado del proceso (se pierde al reiniciar).
+_AF_VENTANA_AVISO_S = float(os.getenv("MOTOR_ANTI_FABRICACION_VENTANA_AVISO_S", "900"))
+_AF_AVISOS_DETECTOR: dict[str, float] = {}
+#: El aviso de «la clave de modo falta y rige duro por omisión» se da una vez por proceso.
+_AF_AVISO_CLAVE_HECHO = False
+
+
+def _toca_avisar_detector(motivo: str) -> bool:
+    ahora = _ahora()
+    clave = motivo[:60]
+    ultimo = _AF_AVISOS_DETECTOR.get(clave)
+    if ultimo is not None and ahora - ultimo < _AF_VENTANA_AVISO_S:
+        return False
+    _AF_AVISOS_DETECTOR[clave] = ahora
+    return True
+
+
+async def _notify_clave_de_modo(motivos: list[str]) -> None:
+    """Una vez por proceso: el modo salió `duro` POR OMISIÓN (clave ausente, inválida o base
+    ilegible). Visible, no silencioso: con la clave sin sembrar, todo falso positivo falla un job."""
+    global _AF_AVISO_CLAVE_HECHO
+    if _AF_AVISO_CLAVE_HECHO:
+        return
+    _AF_AVISO_CLAVE_HECHO = True
+    logger.error("anti_fabricacion: modo 'duro' POR OMISIÓN (%s). Ver docs/runbooks/anti-fabricacion-activacion.md", "; ".join(motivos))
+    from jacobs.reaper import send_telegram_alert
+    result = await send_telegram_alert(
+        "🔴 JAX anti-fabricación: el modo salió 'duro' por omisión (" + "; ".join(motivos) +
+        "). Sembrar anti_fabricacion.modo='sombra' antes de seguir (docs/runbooks/anti-fabricacion-activacion.md).")
+    if not result["ok"]:
+        logger.error("aviso de clave de modo ausente no se pudo entregar: %s", result["error"])
+
+
+async def _notify_detector_caido(*, job_id: str, motor: str, capability: str, modo, detalle: str) -> None:
+    """Aviso inmediato de que el detector de estructura no pudo mirar un job. En
+    sombra el job sigue y su salida NO cuenta entre las 30 de la fase; en duro el
+    job ya no llega al motor."""
+    if not _toca_avisar_detector(detalle):
+        logger.warning("job %s: detector de estructura caído (aviso ya dado en la ventana): %s", job_id, detalle[:200])
+        return
+    from jacobs.reaper import send_telegram_alert
+    consecuencia = ("el job FALLÓ antes de llamar al motor" if modo == _af_consecuencia.Modo.DURO
+                    else "modo sombra: el job sigue, sin veredicto, y no cuenta entre las 30 salidas")
+    result = await send_telegram_alert(
+        f"🔴 JAX anti-fabricación: detector de estructura NO disponible en job {job_id} ({motor}/{capability}); "
+        f"{consecuencia}.\n{detalle[:300]}")
+    if not result["ok"]:
+        logger.error("job %s: aviso de detector caído no se pudo entregar: %s", job_id, result["error"])
+
+
+def _auditar_estructura(**campos: Any) -> None:
+    """Evento en audit.jsonl. Síncrono (abre y escribe un archivo): el worker lo
+    llama con asyncio.to_thread. La ruta se lee AL EMITIR, no al importar. Fail-soft
+    a propósito: no poder escribir la auditoría no cambia el desenlace del job (el
+    rastro principal es `_estructura` en el JSONL del job) pero queda en ERROR."""
+    try:
+        from audit import AuditLog
+        from config_entorno import ruta_absoluta_requerida
+        AuditLog(str(ruta_absoluta_requerida("JAX_AUDIT_LOG_PATH"))).log_estructura(**campos)
+    except Exception:  # fail-soft: ver docstring; el job ya tiene su veredicto guardado
+        logger.exception("job %s: no se pudo escribir ESTRUCTURA_SIN_RESPALDO en audit.jsonl", campos.get("job_id"))
+
+
 def _humanize_error(exc: Exception) -> str:
     if isinstance(exc, httpx.TimeoutException):
         return "Timeout al llamar a la API del motor — la respuesta tardó demasiado"
@@ -452,6 +535,7 @@ async def run(
     caller: str | None = None,
     timeout_seconds: int | None = None,
     pipeline_id: str | None = None,
+    entrada: str = "/motor/governed-dispatch",
 ) -> None:
     """Corre un job del Motor Registry (ver _correr_trabajo).
 
@@ -468,7 +552,7 @@ async def run(
             job_id=job_id, motor=motor, capability=capability, prompt=prompt,
             context=context, store=store, catalog=catalog, kill_switch_path=kill_switch_path,
             user_id=user_id, tenant_id=tenant_id, caller=caller, timeout_seconds=timeout_seconds,
-            pipeline_id=pipeline_id,
+            pipeline_id=pipeline_id, entrada=entrada,
         )
 
 
@@ -487,6 +571,7 @@ async def _correr_trabajo(
     caller: str | None = None,
     timeout_seconds: int | None = None,
     pipeline_id: str | None = None,
+    entrada: str = "/motor/governed-dispatch",
 ) -> None:
     store.update(job_id, status=JobStatus.RUNNING.value, started_at=time.time())
 
@@ -497,6 +582,39 @@ async def _correr_trabajo(
             status=JobStatus.FAILED.value,
             finished_at=time.time(),
             error="killed_by_switch — PAUSE detectado antes de iniciar",
+        )
+        return
+
+    # Anti-fabricación (capas 2 y 4): modo y whitelist ANTES de llamar al motor.
+    # Una fuente obligatoria caída en modo duro es FAILED `detector_no_disponible`
+    # sin ninguna llamada de transporte; en sombra el job sigue y el veredicto
+    # queda `no_corrio` (la sombra observa, no puede tumbar el servicio).
+    af_motivos: list[str] = []
+    af_modo = await _af_consecuencia.leer_modo(motivos=af_motivos)
+    if af_motivos:
+        await _notify_clave_de_modo(af_motivos)
+    af_wl = None
+    af_error_detector: str | None = None
+    try:
+        from motor_registry.tool_authority import WORKSPACE_ROOT as _raiz_workspace
+        af_wl = await _af_whitelist.derivar(_af_whitelist.fuentes_por_defecto(
+            _raiz_workspace, herramientas=[t["function"]["name"] for t in TOOLS_CATALOG],
+            jax_checkout=os.environ.get("JAX_ANTI_FAB_JAX_CHECKOUT", _af_whitelist.JAX_CHECKOUT_POR_DEFECTO)))
+    except Exception as exc:  # fail-closed: cualquier fallo del detector (DetectorNoDisponible o un bug) cuenta como detector caído
+        af_error_detector = f"{type(exc).__name__}: {exc}"
+        logger.error("job %s: detector de estructura no disponible: %s", job_id, af_error_detector)
+    if af_wl is None:
+        await _notify_detector_caido(job_id=job_id, motor=motor, capability=capability, modo=af_modo,
+                                     detalle=af_error_detector or "")
+    if af_wl is None and af_modo == _af_consecuencia.Modo.DURO:
+        store.update(
+            job_id,
+            status=JobStatus.FAILED.value,
+            finished_at=time.time(),
+            error=f"{_af_consecuencia.ERROR_DETECTOR}: {af_error_detector}",
+            estructura_veredicto=_af_estructura.NO_CORRIO,
+            _estructura=_af_estructura.no_corrio(_af_consecuencia.ERROR_DETECTOR).como_dict(),
+            _unbacked_claims=[],
         )
         return
 
@@ -1117,6 +1235,49 @@ async def _correr_trabajo(
         await _report_usage("cancelled")
         return
 
+    # Anti-fabricación (capa 2 + capa 4): contraste de la salida con la whitelist.
+    # Después de validate() y ANTES de escribir result_path / marcar COMPLETED.
+    cap_forbidden = list(getattr(cap_entry, "forbidden_paths", None) or []) if cap_entry else []
+    objetivo = context.get("objective")
+    corpus_confiable = [capability] + cap_forbidden + ([objetivo] if isinstance(objetivo, str) else [])
+    propias = [f["path"] for f in files_written if f.get("path")]
+    af_fallo = af_error_detector  # None si la whitelist se derivó bien
+    veredicto = _af_estructura.no_corrio(_af_consecuencia.ERROR_DETECTOR)
+    if af_wl is not None:
+        try:
+            veredicto = await asyncio.to_thread(
+                _af_estructura.verificar, content or "", af_wl, corpus_confiable, propias,
+                previos=[prompt], schema=output_schema or "")
+        except Exception as exc:  # fail-closed: un fallo del detector no se lee como limpio (en duro, FAILED)
+            af_fallo = f"{type(exc).__name__}: {exc}"
+            logger.exception("job %s: el detector de estructura falló sobre la salida", job_id)
+            await _notify_detector_caido(job_id=job_id, motor=motor, capability=capability, modo=af_modo, detalle=af_fallo)
+    decision = _af_consecuencia.aplicar(veredicto, af_modo)
+    if af_fallo and af_wl is not None and af_modo == _af_consecuencia.Modo.DURO:
+        decision = _af_consecuencia.Decision(
+            modo=af_modo, fallar=True, guardar=decision.guardar,
+            error=f"{_af_consecuencia.ERROR_DETECTOR}: {af_fallo}")
+    if decision.avisar:
+        await asyncio.to_thread(
+            _auditar_estructura, job_id=job_id, motor=motor, capability=capability, pipeline_id=pipeline_id,
+            endpoint=entrada, trace_id=(store.get(job_id).trace_id if store.get(job_id) else None), modo=af_modo.value,
+            items=decision.guardar["_unbacked_claims"], items_total=decision.guardar["_unbacked_claims_total"],
+            usos_nuevo=veredicto.usos_nuevo, usos_hipotesis=veredicto.usos_hipotesis)
+        await _notify_estructura(job_id=job_id, motor=motor, capability=capability, pipeline_id=pipeline_id,
+                                 veredicto=veredicto, modo=af_modo)
+    if decision.fallar:
+        store.update(
+            job_id, status=JobStatus.FAILED.value, finished_at=time.time(), error=decision.error,
+            estructura_veredicto=veredicto.estado,
+            _finish_reason=finish_reason,
+            _usage={"prompt_tokens": cumulative_prompt_tokens, "completion_tokens": cumulative_completion_tokens},
+            _tool_loop_iterations=iteration, _tool_loop_history=tool_loop_history,
+            _files_written=files_written, **decision.guardar,
+        )
+        await _notify_failed_with_writes(job_id=job_id, files_written=files_written, reason="estructura sin respaldo")
+        await _report_usage("failed")
+        return
+
     # La salida completa, en su archivo: result_summary son 200 caracteres y
     # era todo lo que quedaba (E2E de la cadena, 1bb0da78, 2026-09-12).
     result_path = await asyncio.to_thread(store.write_result, job_id, content or "")
@@ -1137,6 +1298,8 @@ async def _correr_trabajo(
         _tool_loop_iterations=iteration,
         _tool_loop_history=tool_loop_history,
         _files_written=files_written,
+        estructura_veredicto=veredicto.estado,
+        **decision.guardar,
     )
 
     # T1.b (2026-08-22, auditoria usage_writer): antes había un bloque

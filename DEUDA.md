@@ -23,6 +23,18 @@ Los items sin fecha de "verificado hoy" vienen de CONTEXT.md §9 — heredan
 su fecha de última verificación real, no una nueva.
 
 ## Bloquea trabajo
+
+- [ ] **2026-10-22 · anti-fabricación: `context["objective"]` no llega al worker por el camino vivo.** El
+  detector de estructura (`jax/anti_fabricacion/`, `worker.py`) toma como corpus confiable el
+  objetivo de la persona, pero el `context` que recibe el worker no lo trae (el coordinador lo declaró
+  ausente; NO verificado contra `request.projection()["context"]` de `/motor/governed-dispatch`, el único
+  camino vivo: `/motor/dispatch` responde 410)
+  (el `objective` vive en el contexto del pipeline de Jacobs, `jacobs/routes.py`). Hoy el corpus
+  confiable es solo el nombre de la capability y sus `forbidden_paths`, y el prompt entero entra
+  como `previos` (sin veredicto de origen => heredado = marcado). Efecto: un archivo real que la
+  persona nombra solo en su prompt no se respalda por eso (lo respalda la whitelist si existe).
+  Límite declarado por el escalón 3 (Enmienda 1, regla 5), fuera del PR de las capas 2 y 4.
+  Verificado 2026-10-22 contra `routes.py` y `job_tasks.py`.
 - **Una excepción dentro del `finally` de `conexion()` cuelga el apagado del servicio — hallado 2026-09-17 (ronda pre-vuelo y continuar), CÓDIGO Y ARREGLO DEL FRENTE F.**
   - **Archivo y función:** `jacobs/store.py`, el context manager `conexion()`
     (alias `conexion_del_pool()`), su bloque `finally`.
