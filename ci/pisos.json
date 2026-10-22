@@ -111,7 +111,7 @@
     },
     "tests-puros/out": {
       "patron": "^3923 passed, 45 skipped",
-      "mensaje": "PISO ROTO: se esperaban 3923 tests CORRIDOS, exactamente 45 skipped y 1 xfailed (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido en el runner CI run39787825306 el 2026-10-22; la verificación completa local del comando de CI dio 3962 passed, 3 skipped y 3 xfailed por diferencias conocidas de host frente al runner."
+      "mensaje": "PISO ROTO: se esperaban 3923 tests CORRIDOS, exactamente 45 skipped y se observó 1 xfailed (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido en el runner CI run39787825306 el 2026-10-22; la verificación completa local del comando de CI dio 3962 passed, 3 skipped y 3 xfailed por diferencias conocidas de host frente al runner."
     },
     "tests-puros/arranque_instalado": {
       "patron": "^46 passed, 9 skipped",
