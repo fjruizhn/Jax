@@ -40,12 +40,18 @@ LÍMITES DECLARADOS (lo que este detector NO ve; no son olvidos).
     `no_verificable` (Enmienda 2). Las rutas de jax-platform están fuera de v1.
   * `corpus_confiable` solo respalda lo que la persona o el sistema dijeron. En el
     worker, hoy, eso es el nombre de la capability, sus `forbidden_paths` y
-    `context["objective"]` si viene; `/motor/dispatch` no manda `objective`, así que
-    en la práctica el prompt entero entra como `previos`: un operador que despacha
-    directo y nombra un archivo real en su prompt no lo respalda por eso (lo respalda
-    la whitelist, si existe).
-  * La whitelist de archivos es `git ls-files`: un archivo que existe en disco pero
-    no está versionado cuenta como inexistente.
+    `context["objective"]` si viene. Que ese `objective` llegue por el único camino
+    vivo (`/motor/governed-dispatch`; `/motor/dispatch` responde 410) NO está verificado:
+    si no llega, el prompt entero entra como `previos` y un operador que nombra un archivo
+    real en su prompt no lo respalda por eso (lo respalda la whitelist, si existe). Ver
+    DEUDA.md.
+  * Los archivos de la whitelist son los versionados (`git ls-files`) MÁS el árbol visible en
+    disco del workspace (solo la ruta) MÁS, opcional, los del checkout desplegado de jax. Si
+    el árbol se pasó del tope o el checkout cayó, una ruta no hallada es `no_verificable`.
+  * Una entrada de más de MAX_BYTES_ENTRADA no se revisa: `no_verificable` ("tamano").
+  * `nuevo:` y la oración con «?» eximen a un candidato: el veredicto cuenta cuántas veces
+    se usaron (`usos_nuevo`, `usos_hipotesis`) para ver en la fase sombra si un modelo
+    aprende a abusar de ellos.
 
 ESTADOS: limpio / marcado / no_verificable (una fuente opcional cayó para esa
 categoría: visible, no pasa limpio, no acusa) / no_corrio.
@@ -75,17 +81,20 @@ HEREDADO = "heredado"
 
 #: Cota del largo de un candidato y del número de ítems que se guardan por veredicto.
 _MAX_CANDIDATO = 200
+#: Tope de la salida que se revisa (bytes UTF-8). Más grande => no_verificable ("tamano").
+MAX_BYTES_ENTRADA = 256 * 1024
+#: Extensiones de archivo que NUNCA son la columna de una tabla (`motor.py` no es `motor`.`py`).
+_EXT_NO_COLUMNA = frozenset("py md json yaml yml sql sh toml txt js jsx ts tsx html css csv ini cfg conf xml log lock env php rb go rs java c h cpp tf service timer".split())
 _MAX_ITEMS = 100
 
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _SPAN = re.compile(r"`([^`\n]+)`")
-_URL = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://\S+")
+_URL = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]{0,30}://\S+")
 _RUTA_BARE = re.compile(r"(?<![\w/.:@~$-])((?:/|\./|\.\./)?[\w.@+-]+(?:/[\w.@+-]+)+/?)")
 _PAR_BARE = re.compile(r"(?<![\w/.@-])([A-Za-z_]\w*)\.([A-Za-z_]\w*)\b")
 _SERVICIO_BARE = re.compile(r"(?<![\w/.@-])([\w@.-]+\.(?:service|timer))(?![\w-])")
 _NUEVO_LINEA = re.compile(r"^\s*(?:[-*•+]\s*|\d+[.)]\s*)?nuevo\s*:", re.IGNORECASE)
 _RUTA_CHARS = re.compile(r"[\w.@+-]+(?:/[\w.@+-]+)*/?\Z")
-_VALLA = re.compile(r"```([A-Za-z0-9_+-]*)[^\n]*\n(.*?)```", re.DOTALL)
 _DIFF_A = re.compile(r"^--- a/(\S+)", re.MULTILINE)
 _DIFF_NUEVO = re.compile(r"^--- /dev/null[^\n]*\n\+\+\+ b/(\S+)", re.MULTILINE)
 _DEF = re.compile(r"^\+\s*(?:async\s+def|def|class)\s+([A-Za-z_]\w*)", re.MULTILINE)
@@ -122,6 +131,9 @@ class Veredicto:
     no_verificables: tuple[str, ...] = ()
     fuera_de_alcance: tuple[str, ...] = ()
     motivo: str = ""
+    #: cuántos candidatos eximió `nuevo:` y cuántos la oración con «?» (para ver abusos en sombra)
+    usos_nuevo: int = 0
+    usos_hipotesis: int = 0
 
     def como_dict(self) -> dict:
         return {
@@ -133,6 +145,8 @@ class Veredicto:
             "no_verificables": list(self.no_verificables),
             "fuera_de_alcance": list(self.fuera_de_alcance),
             "motivo": self.motivo,
+            "usos_nuevo": self.usos_nuevo,
+            "usos_hipotesis": self.usos_hipotesis,
             # el detector no llegó a mirar: esta salida no cuenta entre las 30 de la fase sombra
             "cuenta_para_sombra": self.estado != NO_CORRIO,
         }
@@ -155,6 +169,32 @@ class _Cand:
 # --------------------------------------------------------------------------
 # extracción
 # --------------------------------------------------------------------------
+
+def _separar_vallas(texto: str) -> tuple[list[str], str]:
+    """(cuerpos de las vallas ```diff|patch, texto sin ninguna valla cerrada). Recorrido
+    lineal con `str.find`: una regex con DOTALL y cuantificador perezoso es cuadrática con
+    muchas vallas sin cerrar. Una valla sin cierre se deja como prosa."""
+    diffs: list[str] = []
+    fuera: list[str] = []
+    i = 0
+    while True:
+        a = texto.find("```", i)
+        if a < 0:
+            fuera.append(texto[i:])
+            break
+        fin_cabecera = texto.find("\n", a)
+        cierre = texto.find("```", fin_cabecera + 1) if fin_cabecera >= 0 else -1
+        if fin_cabecera < 0 or cierre < 0:
+            fuera.append(texto[i:])
+            break
+        fuera.append(texto[i:a])
+        fuera.append("\n")
+        lenguaje = texto[a + 3:fin_cabecera].split(" ", 1)[0].strip().lower()
+        if lenguaje in ("diff", "patch"):
+            diffs.append(texto[fin_cabecera + 1:cierre])
+        i = cierre + 3
+    return diffs, "".join(fuera)
+
 
 def _strings(valor) -> list[str]:
     if isinstance(valor, str):
@@ -266,7 +306,7 @@ def _clasificar_span(s: str, wl: Whitelist, exts: frozenset[str], raices: frozen
         return None
     if "." in s:
         izq, _, der = s.partition(".")
-        if izq in wl.tablas and _IDENT.match(der):
+        if izq in wl.tablas and _IDENT.match(der) and (der.lower() not in _EXT_NO_COLUMNA or s in wl.pares):
             return ("tabla_columna", s)
     # Enmienda 1, regla 2: un identificador suelto (sin «/») o un nombre de archivo sin
     # directorio NO es candidato. Límite declarado: «`bodegas` es una tabla» no se atrapa.
@@ -287,11 +327,7 @@ def _candidatos(segs, wl: Whitelist) -> tuple[list[_Cand], list[str], set[str]]:
                 cands.append(_Cand(r, "ruta_abs" if r.startswith("/") else "ruta", "afirma"))
             continue
         # fences: el código de ejemplo no es prosa; los de diff/patch se leen como diff
-        bloques_diff = []
-        for lenguaje, cuerpo in _VALLA.findall(texto):
-            if lenguaje.lower() in ("diff", "patch"):
-                bloques_diff.append(cuerpo)
-        texto_sin_vallas = _VALLA.sub("\n", texto)
+        bloques_diff, texto_sin_vallas = _separar_vallas(texto)
         for cuerpo in bloques_diff + [texto_sin_vallas]:
             afirmados, nuevos = _diff(cuerpo)
             cands += [_Cand(_normalizar_ruta(a), "ruta", "diff") for a in afirmados]
@@ -320,12 +356,15 @@ def _candidatos(segs, wl: Whitelist) -> tuple[list[_Cand], list[str], set[str]]:
                 for m in _SERVICIO_BARE.finditer(fuera_de_spans):
                     cands.append(_Cand(_normalizar_ruta(m.group(1)), "servicio", "texto", hipotesis, nuevo_linea))
                 for m in _RUTA_BARE.finditer(fuera_de_spans):
+                    if len(m.group(1)) > _MAX_CANDIDATO:
+                        continue   # no es una ruta: es ruido (y normalizarlo costaría de más)
                     r = _normalizar_ruta(m.group(1))
                     if _RUTA_CHARS.match(r) and _es_forma_de_ruta(r, exts, raices):
                         cands.append(_Cand(r, "ruta_abs" if r.startswith("/") else "ruta", "texto", hipotesis, nuevo_linea))
                 sin_rutas = _RUTA_BARE.sub(" ", fuera_de_spans)
                 for m in _PAR_BARE.finditer(sin_rutas):
-                    if m.group(1) in wl.tablas:
+                    if m.group(1) in wl.tablas and (m.group(2).lower() not in _EXT_NO_COLUMNA
+                                                    or f"{m.group(1)}.{m.group(2)}" in wl.pares):
                         cands.append(_Cand(f"{m.group(1)}.{m.group(2)}", "tabla_columna", "texto", hipotesis, nuevo_linea))
     return cands, propuestos, fuera
 
@@ -387,6 +426,9 @@ def verificar(
     capability). `propias`: lo que el job escribió. `previos`: salidas de pasos
     anteriores (otros modelos): NUNCA respaldan; un candidato que solo está ahí es
     `heredado`. `schema`: el output_schema de la capability, si hay."""
+    if len((salida or "").encode("utf-8", "ignore")) > MAX_BYTES_ENTRADA:
+        return Veredicto(estado=NO_VERIFICABLE, no_verificables=("tamano",),
+                         motivo=f"la salida supera {MAX_BYTES_ENTRADA} bytes: no se revisa")
     confiable = [corpus_confiable] if isinstance(corpus_confiable, str) else list(corpus_confiable)
     segs = _segmentos(salida or "", schema)
     cands, propuestos_diff, fuera = _candidatos(segs, wl)
@@ -399,6 +441,7 @@ def verificar(
     propuestos: list[str] = list(dict.fromkeys(propuestos_diff))
     no_verificables: set[str] = set()
     vistos: set[tuple[str, str]] = set()
+    usos_nuevo = usos_hipotesis = 0
 
     for c in cands:
         clave = (c.texto, c.tipo)
@@ -407,7 +450,10 @@ def verificar(
         if c.hipotesis:
             vistos.add(clave)
             hipotesis.append(c.texto)
+            usos_hipotesis += 1
             continue
+        if c.nuevo:
+            usos_nuevo += 1
         if c.nuevo or c.texto in propios_total or _es_propia(c.texto, propios_total):
             vistos.add(clave)
             if c.texto not in propuestos:
@@ -466,5 +512,5 @@ def verificar(
     return Veredicto(
         estado=estado, items=tuple(items), propuestos=tuple(propuestos),
         hipotesis=tuple(dict.fromkeys(hipotesis)), no_verificables=tuple(sorted(no_verificables)),
-        fuera_de_alcance=tuple(sorted(fuera)),
+        fuera_de_alcance=tuple(sorted(fuera)), usos_nuevo=usos_nuevo, usos_hipotesis=usos_hipotesis,
     )

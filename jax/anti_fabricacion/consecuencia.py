@@ -47,6 +47,8 @@ ERROR_DETECTOR = "detector_no_disponible"
 EVENTO_AUDITORIA = "ESTRUCTURA_SIN_RESPALDO"
 
 _MAX_ERROR = 600
+#: Cota de `_unbacked_claims` en el JSONL del job (el total real va en `_unbacked_claims_total`).
+MAX_CLAIMS = 100
 
 
 class Modo(str, Enum):
@@ -66,7 +68,8 @@ class Decision:
 
 def aplicar(veredicto: Veredicto, modo: Modo) -> Decision:
     guardar = {
-        "_unbacked_claims": [asdict(i) for i in veredicto.items],
+        "_unbacked_claims": [asdict(i) for i in veredicto.items[:MAX_CLAIMS]],
+        "_unbacked_claims_total": len(veredicto.items),
         "_estructura": veredicto.como_dict(),
     }
     if veredicto.estado != MARCADO:
@@ -78,8 +81,12 @@ def aplicar(veredicto: Veredicto, modo: Modo) -> Decision:
     return Decision(modo=modo, avisar=True, guardar=guardar)
 
 
-async def leer_modo(conectar=None) -> Modo:
-    """Modo vigente. Cualquier cosa que no sea exactamente `sombra` o `duro` es `duro`."""
+async def leer_modo(conectar=None, *, motivos: list[str] | None = None) -> Modo:
+    """Modo vigente. Cualquier cosa que no sea exactamente `sombra` o `duro` es `duro`.
+
+    `motivos`: si se pasa una lista, se le agrega POR QUÉ el modo cayó al `duro` por defecto
+    (clave ausente, valor inválido, base ilegible). Con la clave bien puesta queda vacía. El
+    worker la usa para avisar una vez por proceso: un `duro` por omisión no es silencioso."""
     try:
         conn = await (conectar or _db_conn)()
         try:
@@ -92,11 +99,17 @@ async def leer_modo(conectar=None) -> Modo:
         if valor == Modo.SOMBRA.value:
             return Modo.SOMBRA
         if valor != Modo.DURO.value:
-            logger.warning("anti_fabricacion: %s=%r no es válido: se usa 'duro'", CLAVE_MODO, valor)
+            razon = (f"la clave {CLAVE_MODO} falta en axioma_config" if not valor
+                     else f"{CLAVE_MODO}={valor!r} no es válido")
+            logger.warning("anti_fabricacion: %s: se usa 'duro'", razon)
+            if motivos is not None:
+                motivos.append(razon)
         return Modo.DURO
     except Exception as exc:  # fail-closed: modo ilegible o base caída -> duro, nunca sombra por accidente
         logger.warning("anti_fabricacion: no se pudo leer %s (%s: %s): se usa 'duro'",
                        CLAVE_MODO, type(exc).__name__, exc)
+        if motivos is not None:
+            motivos.append(f"no se pudo leer {CLAVE_MODO} ({type(exc).__name__})")
         return Modo.DURO
 
 
@@ -109,5 +122,6 @@ def mensaje_aviso(*, job_id: str, motor: str, capability: str, veredicto: Veredi
     return (
         f"{marca} JAX anti-fabricación: job {job_id} ({motor}/{capability}"
         f"{', pipeline ' + pipeline_id if pipeline_id else ''}) afirma estructura sin respaldo; {consecuencia}.\n"
-        f"{detalle}"
+        f"{detalle}\n"
+        f"(escapes usados en esta salida: nuevo:={veredicto.usos_nuevo}, «?»={veredicto.usos_hipotesis})"
     )
