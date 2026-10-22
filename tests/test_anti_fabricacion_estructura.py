@@ -190,9 +190,22 @@ def test_fuente_opcional_caida_da_no_verificable_sin_acusar():
     assert v.estado == NO_VERIFICABLE and not v.items and "rutas_app" in v.no_verificables
 
 
-def test_servicio_systemd_esta_fuera_de_v1_y_se_declara():
-    v = _v("reinicia `jax-las-manos.service`")
-    assert v.estado == LIMPIO and "systemd" in v.fuera_de_alcance
+def test_unidad_de_servicio_sin_fuente_es_no_verificable_nunca_limpia():
+    """Enmienda 2, regla 1: en v1 no hay fuente de unidades en vivo. Una unidad que el repo
+    versionado no tiene queda visible como no_verificable: ni limpia ni acusada."""
+    for texto in ("reinicié `jax-las-manos.service`", "el temporizador `respaldo-diario.timer` corre",
+                  "reinicié jax-las-manos.service ayer"):
+        v = _v(texto)
+        assert v.estado == NO_VERIFICABLE and "systemd" in v.no_verificables and not v.items, texto
+        assert not aplicar(v, Modo.DURO).fallar
+    arq = json.dumps({"summary": "El unit `jax-las-manos.service` ya arranca", "risks": [], "recommendations": "n/a"})
+    assert _v(arq, schema="architecture_review.v1").estado == NO_VERIFICABLE
+
+
+def test_unidad_que_el_repo_versionado_tiene_si_es_limpia():
+    wl = _wl(archivos=frozenset({"jax/core/x.py", "ops/systemd/jax-las-manos.service", "ops/systemd/respaldo-diario.timer"}))
+    assert _v("reinicié `jax-las-manos.service` y `respaldo-diario.timer`.", wl=wl).estado == LIMPIO
+    assert _v("reinicié `otra-cosa.service`", wl=wl).estado == NO_VERIFICABLE
 
 
 # --- propuesto, hipotesis, corpus confiable, heredado ---------------------------------
@@ -346,3 +359,90 @@ def test_la_constante_de_exclusiones_es_una_sola_y_dice_lo_que_la_enmienda():
     from jax.anti_fabricacion import exclusiones, whitelist
     assert exclusiones.EXCLUSIONES == frozenset({".git", ".claude-flow", "node_modules", ".venv", "__pycache__"})
     assert whitelist.EXCLUSIONES is exclusiones.EXCLUSIONES
+
+
+# --- Enmienda 2: mapa completo de canales, puntuación, `nuevo:` de línea, tabla.columna -------
+
+def _campos():
+    from motor_registry.output_validator import CANALES_POR_SCHEMA, SCHEMAS
+    return CANALES_POR_SCHEMA, SCHEMAS
+
+
+def test_todo_campo_de_todo_schema_esta_declarado_en_exactamente_un_canal():
+    canales, schemas = _campos()
+    assert set(canales) == set(schemas)
+    for schema, campos in schemas.items():
+        declarados = [c for canal in ("afirma", "propone", "diff") for c in canales[schema][canal]]
+        assert sorted(declarados) == sorted(campos), (schema, set(campos) ^ set(declarados))
+
+
+def _payload(schema, campo, texto):
+    _c, schemas = _campos()
+    d = {f: ([] if f in ("steps", "tests", "risks", "patches") else ("" if f != "human_review_needed" else False))
+         for f in schemas[schema]}
+    d[campo] = texto
+    return json.dumps(d)
+
+
+def _por_canal(canal):
+    import importlib
+    ov = importlib.import_module("las_manos.motor_registry.output_validator")
+    return [(s, c) for s, m in ov.CANALES_POR_SCHEMA.items() for c in m[canal]]
+
+
+def test_en_todo_campo_que_afirma_una_tabla_columna_falsa_y_una_ruta_falsa_se_marcan():
+    for schema, campo in _por_canal("afirma"):
+        if campo == "human_review_needed":
+            continue
+        for texto in ("Falla al leer `jacobs_steps.columna_x`.", "Leí (jacobs_steps.columna_x), no existe.",
+                      "Abrí las_manos/no_existe_jamas.py: falla."):
+            v = _v(_payload(schema, campo, texto), schema=schema)
+            assert v.estado == MARCADO, (schema, campo, texto)
+        real = _v(_payload(schema, campo, "Leí `jacobs_steps.status` en jax/core/x.py."), schema=schema)
+        assert real.estado == LIMPIO, (schema, campo)
+
+
+def test_en_todo_campo_que_propone_lo_inexistente_no_se_revisa():
+    for schema, campo in _por_canal("propone"):
+        v = _v(_payload(schema, campo, "Habría que crear `a/b/nuevo.py` y leer `jacobs_steps.columna_x`."), schema=schema)
+        assert v.estado == LIMPIO, (schema, campo)
+
+
+def test_las_listas_de_los_campos_que_afirman_tambien_se_revisan():
+    d = json.dumps({"plan": "", "steps": ["Edité x/y/falso.py", "Corrí la prueba"], "patches": [],
+                    "tests": ["probé `jacobs_steps.nada`"], "risk_notes": "", "human_review_needed": False})
+    v = _v(d, schema="code_swarm.v1")
+    assert {i.candidato for i in v.items} == {"x/y/falso.py", "jacobs_steps.nada"}
+
+
+@pytest.mark.parametrize("texto", [
+    "Edité services/bodegas.py.", "Edité (services/bodegas.py).", "Edité services/bodegas.py: falla.",
+    "Edité `services/bodegas.py`, luego paré.", 'Edité "services/bodegas.py";', "¿Edité services/bodegas.py!",
+    "Edité services/bodegas.py...",
+])
+def test_la_puntuacion_final_se_recorta_antes_de_comparar(texto):
+    v = _v(texto)
+    assert [i.candidato for i in v.items] == ["services/bodegas.py"], texto
+
+
+@pytest.mark.parametrize("texto", ["Edité jax/core/x.py.", "Edité (jax/core/x.py).", "Edité `jax/core/x.py`, y paré.",
+                                   "Edité jax/core/x.py: bien.", "Lo que hay es jax/core/x.py;"])
+def test_la_puntuacion_final_no_vuelve_inexistente_una_ruta_real(texto):
+    assert _v(texto).estado == LIMPIO, texto
+
+
+@pytest.mark.parametrize("texto", [
+    "- nuevo: services/bodegas.py — repositorio de bodegas",
+    "* Nuevo: `services/bodegas.py` (a crear)",
+    "  • nuevo: services/bodegas.py.",
+    "nuevo: services/bodegas.py",
+    "Lista:\n- nuevo: services/bodegas.py — x\n- nuevo: services/otro.py — y",
+])
+def test_nuevo_como_prefijo_de_linea_o_vineta_vale_como_propuesta(texto):
+    v = _v(texto)
+    assert v.estado == LIMPIO and "services/bodegas.py" in v.propuestos, texto
+
+
+def test_nuevo_a_mitad_de_linea_o_en_otra_linea_no_exime():
+    assert _v("no es nuevo: services/bodegas.py").estado == MARCADO
+    assert _v("- nuevo: services/a.py\n- services/b.py").estado == MARCADO
