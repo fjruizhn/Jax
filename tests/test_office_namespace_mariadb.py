@@ -288,6 +288,53 @@ async def test_office_root_list_uses_cross_tenant_namespace_status_cursor_index(
 
 @requires_test_db
 @_async
+async def test_office_root_list_index_definition_drift_fails_closed_and_rollback_preserves_it():
+    """A same-name foreign index is neither accepted nor deleted by us."""
+    name = f"{_DB}_office_index_drift_{uuid.uuid4().hex[:10]}"
+    assert es_base_de_test(name)
+    await _setup(name)
+    conn = await aiomysql.connect(
+        db=name, autocommit=True, cursorclass=aiomysql.DictCursor,
+        connect_timeout=db_connect_timeout_seconds(), **_params())
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "DROP INDEX idx_jax_project_scope_namespace_status_project ON jax_project_scope")
+            await cur.execute(
+                "CREATE INDEX idx_jax_project_scope_namespace_status_project "
+                "ON jax_project_scope (authorization_namespace, project_id, status)")
+
+            async def index_columns():
+                await cur.execute(
+                    "SELECT COLUMN_NAME FROM information_schema.STATISTICS "
+                    "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='jax_project_scope' "
+                    "AND INDEX_NAME='idx_jax_project_scope_namespace_status_project' "
+                    "ORDER BY SEQ_IN_INDEX")
+                return tuple(row["COLUMN_NAME"] for row in await cur.fetchall())
+
+            async def scope_ddl():
+                await cur.execute("SHOW CREATE TABLE jax_project_scope")
+                return (await cur.fetchone())["Create Table"]
+
+            wrong_shape = ("authorization_namespace", "project_id", "status")
+            assert await index_columns() == wrong_shape
+            before = await scope_ddl()
+            with pytest.raises(RuntimeError, match="unexpected definition"):
+                await apply_project_authority_migration(cur)
+            assert await index_columns() == wrong_shape
+            assert await scope_ddl() == before
+            with pytest.raises(RuntimeError, match="unexpected definition"):
+                await revert_project_lifecycle_migration(cur)
+            assert await index_columns() == wrong_shape
+            await cur.execute("SHOW COLUMNS FROM jax_project_scope LIKE 'authorization_namespace'")
+            assert await cur.fetchone() is not None
+    finally:
+        conn.close()
+        await _drop(name)
+
+
+@requires_test_db
+@_async
 async def test_office_same_key_concurrency_creates_one_project_and_stable_replay():
     """Catches duplicate-key handling that leaves concurrent retries failing."""
     name = f"{_DB}_office_{uuid.uuid4().hex[:10]}"

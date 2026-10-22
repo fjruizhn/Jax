@@ -178,6 +178,46 @@ async def _index_exists(cursor: Any, table: str, name: str) -> bool:
     return _scalar(await cursor.fetchone()) > 0
 
 
+def _field(row: Any, name: str, position: int) -> Any:
+    return row.get(name) if isinstance(row, dict) else row[position]
+
+
+async def _index_shape(cursor: Any, table: str, name: str,
+                       columns: tuple[str, ...]) -> str:
+    """Return ``absent``, ``exact``, or ``drifted`` for a managed index.
+
+    Index names are part of this migration's schema contract.  Treating a
+    same-name index with another order, type, uniqueness, or ignored state as
+    installed would silently defeat a bounded Office list; replacing it would
+    mutate an index this migration does not own.  MariaDB versions before the
+    ``IGNORED`` metadata column are handled without selecting that column.
+    """
+    await cursor.execute(
+        "SELECT COUNT(*) AS n FROM information_schema.COLUMNS "
+        "WHERE TABLE_SCHEMA='information_schema' AND TABLE_NAME='STATISTICS' "
+        "AND COLUMN_NAME='IGNORED'")
+    has_ignored_metadata = _scalar(await cursor.fetchone()) > 0
+    select = "COLUMN_NAME,NON_UNIQUE,INDEX_TYPE"
+    if has_ignored_metadata:
+        select += ",IGNORED"
+    await cursor.execute(
+        "SELECT " + select + " FROM information_schema.STATISTICS "
+        "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND INDEX_NAME=%s "
+        "ORDER BY SEQ_IN_INDEX", (table, name))
+    rows = await cursor.fetchall()
+    if not rows:
+        return "absent"
+    actual_columns = tuple(str(_field(row, "COLUMN_NAME", 0)) for row in rows)
+    btree_non_unique = all(
+        int(_field(row, "NON_UNIQUE", 1)) == 1
+        and str(_field(row, "INDEX_TYPE", 2)).upper() == "BTREE"
+        for row in rows)
+    not_ignored = (not has_ignored_metadata or all(
+        str(_field(row, "IGNORED", 3)).upper() in ("", "0", "NO", "FALSE")
+        for row in rows))
+    return "exact" if actual_columns == columns and btree_non_unique and not_ignored else "drifted"
+
+
 async def _column_type(cursor: Any, table: str, column: str) -> str | None:
     await cursor.execute(
         "SELECT COLUMN_TYPE FROM information_schema.COLUMNS "
@@ -205,6 +245,16 @@ async def _apply_project_lifecycle_migration(cursor: Any) -> None:
     is individually guarded so a second call is a no-op (`apply -> apply`
     idempotence, per the plan's migration test).
     """
+    # A managed same-name index with a foreign definition is schema drift, not
+    # an invitation to mutate this database.  Check before this function's
+    # first ALTER so the failed upgrade remains observational.
+    office_list_index = await _index_shape(
+        cursor, "jax_project_scope", _IDX_SCOPE_NAMESPACE_STATUS_PROJECT,
+        ("authorization_namespace", "status", "project_id"))
+    if office_list_index == "drifted":
+        raise RuntimeError(
+            "cannot upgrade project authority: " + _IDX_SCOPE_NAMESPACE_STATUS_PROJECT
+            + " has an unexpected definition")
     # Namespace comes before the lifecycle CHECK. That ordering matches a fresh
     # authority schema and keeps apply -> revert -> apply structurally stable.
     # Adding the NOT NULL column with its default backfills all legacy scopes as
@@ -221,7 +271,7 @@ async def _apply_project_lifecycle_migration(cursor: Any) -> None:
         await cursor.execute(
             "CREATE INDEX " + _IDX_SCOPE_NAMESPACE_TENANT_STATUS_PROJECT + " "
             "ON jax_project_scope (authorization_namespace, tenant_id, status, project_id)")
-    if not await _index_exists(cursor, "jax_project_scope", _IDX_SCOPE_NAMESPACE_STATUS_PROJECT):
+    if office_list_index == "absent":
         await cursor.execute(
             "CREATE INDEX " + _IDX_SCOPE_NAMESPACE_STATUS_PROJECT + " "
             "ON jax_project_scope (authorization_namespace, status, project_id)")
@@ -412,6 +462,13 @@ async def revert_project_lifecycle_migration(cursor: Any) -> None:
         if _scalar(await cursor.fetchone()) > 0:
             raise RuntimeError(
                 "cannot revert migration 005: non-CLASSIC project scopes require the namespace contract")
+    office_list_index = await _index_shape(
+        cursor, "jax_project_scope", _IDX_SCOPE_NAMESPACE_STATUS_PROJECT,
+        ("authorization_namespace", "status", "project_id"))
+    if office_list_index == "drifted":
+        raise RuntimeError(
+            "cannot revert migration 005: " + _IDX_SCOPE_NAMESPACE_STATUS_PROJECT
+            + " has an unexpected definition")
     await cursor.execute("SHOW TABLES LIKE 'jax_namespace_project_creation_request'")
     if await cursor.fetchone() is not None:
         await cursor.execute("SELECT COUNT(*) AS n FROM jax_namespace_project_creation_request")
@@ -458,7 +515,7 @@ async def revert_project_lifecycle_migration(cursor: Any) -> None:
     if await _index_exists(cursor, "jax_project_scope", _IDX_SCOPE_NAMESPACE_TENANT_STATUS_PROJECT):
         await cursor.execute(
             "DROP INDEX " + _IDX_SCOPE_NAMESPACE_TENANT_STATUS_PROJECT + " ON jax_project_scope")
-    if await _index_exists(cursor, "jax_project_scope", _IDX_SCOPE_NAMESPACE_STATUS_PROJECT):
+    if office_list_index == "exact":
         await cursor.execute(
             "DROP INDEX " + _IDX_SCOPE_NAMESPACE_STATUS_PROJECT + " ON jax_project_scope")
     if await _check_constraint_exists(cursor, _CHK_SCOPE_NAMESPACE):
