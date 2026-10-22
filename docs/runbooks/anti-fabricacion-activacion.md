@@ -10,8 +10,9 @@ Código: `jax/anti_fabricacion/` (symlink `las_manos/anti_fabricacion`), cablead
    `anti_fabricacion.modo='sombra'`. Sin la clave el modo es `duro` por omisión (falla
    cerrado) y cada falso positivo falla un job de producción.
    - Simular: `python3 scripts/anti_fabricacion/sembrar_modo.py`
-   - Aplicar (una persona con GO; `INSERT IGNORE`, nunca pisa un valor existente):
-     `python3 scripts/anti_fabricacion/sembrar_modo.py --aplicar`
+   - Aplicar (una persona con GO; `INSERT IGNORE`, nunca pisa un valor existente; deja su fila en
+     `axioma_config_audit` con actor y fecha):
+     `python3 scripts/anti_fabricacion/sembrar_modo.py --aplicar --actor <user_id o correo>`
    - Comprobar: `python3 scripts/anti_fabricacion/sembrar_modo.py --verificar` (0 = bien).
 2. Reiniciar LAS MANOS. Si la clave faltara igual, el primer job de cada proceso registra un
    ERROR y manda un aviso por Telegram: «el modo salió 'duro' por omisión». No es silencioso.
@@ -21,7 +22,14 @@ Código: `jax/anti_fabricacion/` (symlink `las_manos/anti_fabricacion`), cablead
    (las de `cuenta_para_sombra=false`, detector caído, no cuentan), cada marca clasificada por
    un escalón 3 distinto del que implementó. Si a los 21 días no hay 30, avisar a Fernando.
 4. **Pasar a `duro` lo decide Fernando tras U5** (y tras disparar la alerta una vez a propósito,
-   U7). Cambiar el valor de la clave es la única acción; no hace falta reiniciar (se lee por job).
+   U7). Se hace SOLO con el script, nunca con una sentencia a mano, y queda en `axioma_config_audit`
+   (actor, fecha, valor anterior y nuevo):
+   `python3 scripts/anti_fabricacion/sembrar_modo.py --modo duro --actor fernando --motivo "U5 cumplido: ..."`
+   (nunca es el valor por defecto del script). La tabla no tiene columna para el motivo: queda
+   impreso en la salida; pegarlo en el PR o en el pendiente. No hace falta reiniciar (se lee por job).
+   Volver a `sombra` es el mismo comando con `--modo sombra`.
+5. En duro, una salida de más de 256 KiB falla el job («salida demasiado grande para verificar»);
+   en sombra queda `no_verificable` (categoría `tamano`).
 
 ## Qué mirar en la sombra
 

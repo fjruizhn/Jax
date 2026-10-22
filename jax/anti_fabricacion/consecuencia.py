@@ -66,12 +66,20 @@ class Decision:
     guardar: dict = field(default_factory=dict)
 
 
+#: Error de un job en modo duro cuya salida superó MAX_BYTES_ENTRADA (no se pudo verificar).
+ERROR_SALIDA_GRANDE = "salida demasiado grande para verificar"
+
+
 def aplicar(veredicto: Veredicto, modo: Modo) -> Decision:
     guardar = {
         "_unbacked_claims": [asdict(i) for i in veredicto.items[:MAX_CLAIMS]],
         "_unbacked_claims_total": len(veredicto.items),
         "_estructura": veredicto.como_dict(),
     }
+    if modo == Modo.DURO and "tamano" in veredicto.no_verificables:
+        # Una salida que no se puede verificar por su tamaño no se entrega en duro: de lo contrario
+        # bastaría con inflar la salida para pasar sin revisión. En sombra queda no_verificable, visible.
+        return Decision(modo=modo, fallar=True, error=ERROR_SALIDA_GRANDE, guardar=guardar)
     if veredicto.estado != MARCADO:
         return Decision(modo=modo, guardar=guardar)
     if modo == Modo.DURO:
