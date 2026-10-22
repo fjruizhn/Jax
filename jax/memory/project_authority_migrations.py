@@ -159,6 +159,9 @@ def _normalize_check_clause(value: Any) -> str:
     normalized: list[str] = []
     index = 0
     quote: str | None = None
+    identifier = False
+    identifier_chars: list[str] = []
+    keywords = {"AND", "OR", "IN", "IS", "NOT", "NULL"}
     while index < len(text):
         char = text[index]
         if quote is not None:
@@ -174,12 +177,37 @@ def _normalize_check_clause(value: Any) -> str:
                     quote = None
             index += 1
             continue
+        if identifier:
+            if char == "`":
+                if index + 1 < len(text) and text[index + 1] == "`":
+                    identifier_chars.append("`")
+                    index += 2
+                    continue
+                content = "".join(identifier_chars)
+                # A delimiter can be formatting only for an exact simple
+                # identifier.  Whitespace or an escaped backtick changes the
+                # protected column and therefore stays a distinct token.
+                if content.replace("_", "a").isalnum() and content[:1].isalpha():
+                    normalized.append(f"<ID:{content}>")
+                else:
+                    normalized.append(f"<QID:{content}>")
+                identifier = False
+                identifier_chars = []
+                index += 1
+                continue
+            identifier_chars.append(char)
+            index += 1
+            continue
         if char in ("'", '"'):
             quote = char
             normalized.append(char)
             index += 1
             continue
-        if char.isspace() or char == "`":
+        if char == "`":
+            identifier = True
+            index += 1
+            continue
+        if char.isspace():
             index += 1
             continue
         # MariaDB may place a charset introducer immediately before a string
@@ -192,6 +220,14 @@ def _normalize_check_clause(value: Any) -> str:
             if next_index < len(text) and text[next_index] in ("'", '"'):
                 index = next_index
                 continue
+        if char.isalpha() or char == "_":
+            end = index + 1
+            while end < len(text) and (text[end].isalnum() or text[end] == "_"):
+                end += 1
+            word = text[index:end]
+            normalized.append(word.upper() if word.upper() in keywords else f"<ID:{word}>")
+            index = end
+            continue
         normalized.append(char.upper())
         index += 1
     return "".join(normalized)

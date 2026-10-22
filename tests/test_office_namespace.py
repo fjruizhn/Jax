@@ -49,6 +49,10 @@ def test_check_normalization_preserves_boolean_grouping_and_literal_bytes():
     assert _normalize_check_clause("state IN ('ACT IVE')") != _normalize_check_clause("state IN ('ACTIVE')")
     assert _normalize_check_clause("state IN ('ACT`IVE')") != _normalize_check_clause("state IN ('ACTIVE')")
     assert _normalize_check_clause("state IN ('_utf8mb4ACTIVE')") != _normalize_check_clause("state IN ('ACTIVE')")
+    assert _normalize_check_clause("`authorization_ namespace` IN ('CLASSIC')") != _normalize_check_clause(
+        "authorization_namespace IN ('CLASSIC')")
+    assert _normalize_check_clause("`authorization``namespace` IN ('CLASSIC')") != _normalize_check_clause(
+        "authorization_namespace IN ('CLASSIC')")
 
 
 class Store:
