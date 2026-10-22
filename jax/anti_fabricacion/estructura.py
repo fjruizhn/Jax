@@ -91,6 +91,14 @@ _REF_LINEA = re.compile(r"(?::\d+(?:-\d+)?|::\S*)\Z")
 
 
 @dataclass(frozen=True)
+class Previo:
+    """Salida de un paso anterior (otro modelo). `veredicto` es el estado que el JOB DE
+    ORIGEN guardó para esa salida, o None si no hay origen o no tiene veredicto."""
+    texto: str
+    veredicto: str | None = None
+
+
+@dataclass(frozen=True)
 class Item:
     candidato: str
     tipo: str      # ruta | ruta_abs | tabla_columna | simbolo

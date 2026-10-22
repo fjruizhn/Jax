@@ -243,3 +243,108 @@ def test_las_manos_importa_el_paquete_y_el_worker_sin_la_raiz_del_repo(tmp_path)
                        capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stderr[-800:]
     assert r.stdout.strip() == "importado"
+
+
+# --- Enmienda 1: raíces, exclusiones compartidas, tope, huella -----------------------------
+
+import os  # noqa: E402
+
+
+def _git_env():
+    return {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@t", "PATH": "/usr/bin:/bin"}
+
+
+def test_la_constante_de_exclusiones_es_una_sola_y_dice_lo_que_la_enmienda():
+    assert wl_mod.EXCLUSIONES == frozenset({".git", ".claude-flow", "node_modules", ".venv", "__pycache__"})
+
+
+def test_un_cambio_dentro_de_claude_flow_no_reconstruye_el_memo(tmp_path):
+    """Regla 6 (el daemon de Ruflo ensucia el workspace sin parar)."""
+    g = _repo(tmp_path)
+    (tmp_path / ".claude-flow").mkdir()
+    (tmp_path / ".claude-flow" / "estado.json").write_text("1")
+    g("add", "-f", ".claude-flow/estado.json")
+    g("commit", "-q", "-m", "estado")
+    antes = wl_mod.leer_git(tmp_path)
+    (tmp_path / ".claude-flow" / "estado.json").write_text("2")         # versionado y modificado
+    (tmp_path / ".claude-flow" / "nuevo.json").write_text("x")          # nuevo sin versionar
+    despues = wl_mod.leer_git(tmp_path)
+    assert despues.status_hash == antes.status_hash
+
+
+def test_un_archivo_nuevo_versionado_si_cambia_la_huella_de_status(tmp_path):
+    g = _repo(tmp_path)
+    antes = wl_mod.leer_git(tmp_path)
+    (tmp_path / "otro.py").write_text("Y = 2\n")
+    g("add", "otro.py")
+    despues = wl_mod.leer_git(tmp_path)
+    assert despues.status_hash != antes.status_hash
+
+
+def test_el_arbol_en_disco_aporta_rutas_con_el_encierro_y_las_exclusiones(tmp_path):
+    raiz = tmp_path / "ws"
+    (raiz / "proyectos" / "p1").mkdir(parents=True)
+    (raiz / "proyectos" / "p1" / "doc.md").write_text("x")
+    for ex in (".claude-flow", "node_modules", "__pycache__", ".venv"):
+        (raiz / ex).mkdir()
+        (raiz / ex / "z.txt").write_text("x")
+    afuera = tmp_path / "afuera"
+    afuera.mkdir()
+    (afuera / "secreto.txt").write_text("x")
+    os.symlink(afuera, raiz / "enlace_dir")
+    os.symlink(afuera / "secreto.txt", raiz / "enlace.txt")
+    rutas, truncado = wl_mod.recorrer_disco(raiz)
+    assert "proyectos/p1/doc.md" in rutas and not truncado
+    assert not any(r.split("/")[0] in wl_mod.EXCLUSIONES for r in rutas)
+    assert not any("enlace" in r or "secreto" in r for r in rutas), rutas
+
+
+def test_pasarse_del_tope_declara_archivos_no_verificable(tmp_path, monkeypatch):
+    raiz = tmp_path / "ws"
+    raiz.mkdir()
+    for i in range(6):
+        (raiz / f"f{i}.txt").write_text("x")
+    monkeypatch.setattr(wl_mod, "TOPE_ENTRADAS", 5)
+    rutas, truncado = wl_mod.recorrer_disco(raiz)
+    assert truncado
+    m = Mundo()
+
+    async def disco():
+        return rutas, truncado
+    wl = _correr(derivar(m.fuentes(disco=disco)))
+    assert "archivos" in wl.no_disponibles
+
+
+def test_el_tope_es_de_20000_entradas():
+    assert wl_mod.TOPE_ENTRADAS == 20000
+
+
+def test_no_versionados_aportan_la_ruta_pero_no_simbolos(tmp_path):
+    g = _repo(tmp_path)  # m.py versionado: define X
+    (tmp_path / "suelto.py").write_text("SIMBOLO_NO_VERSIONADO = 1\n")
+    f = wl_mod.fuentes_por_defecto(tmp_path)
+
+    async def huella():
+        return "H"
+
+    async def esquema():
+        return _esquema()
+    import dataclasses
+    f = dataclasses.replace(f, huella=huella, esquema=esquema, rutas_app=None, claves=None, modelos=None)
+    wl = _correr(derivar(f))
+    assert "suelto.py" in wl.archivos and "m.py" in wl.archivos
+    assert "X" in wl.simbolos and "SIMBOLO_NO_VERSIONADO" not in wl.simbolos
+
+
+def test_checkout_de_jax_es_fuente_opcional_con_solo_git_ls_files(tmp_path):
+    g = _repo(tmp_path)
+    m = Mundo()
+    wl = _correr(derivar(m.fuentes(codigo_jax=lambda: wl_mod.rutas_de_checkout(tmp_path))))
+    assert "m.py" in wl.archivos and "jax_checkout" not in wl.no_disponibles
+
+    async def cae():
+        raise OSError("no hay checkout")
+    wl_mod._MEMO.clear()
+    wl2 = _correr(derivar(m.fuentes(codigo_jax=cae)))
+    assert "jax_checkout" in wl2.no_disponibles

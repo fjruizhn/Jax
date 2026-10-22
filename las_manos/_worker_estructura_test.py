@@ -175,6 +175,13 @@ class WorkerEstructuraTest(unittest.IsolatedAsyncioTestCase):
         s = self.store._index[job_id]
         assert post.call_count == 1 and s["status"] == "completed", s
         assert s["_estructura"]["estado"] == "no_corrio"
+        # regla 4 de la Enmienda 1: aviso inmediato, y esta salida no cuenta entre las 30 de la sombra
+        assert s["_estructura"]["cuenta_para_sombra"] is False
+        assert self.telegram.await_count == 1 and "detector" in self.telegram.await_args.args[0].lower()
+
+    async def test_duro_con_el_detector_caido_tambien_avisa(self):
+        await self._correr(_REAL, modo="duro", esquema_cae=True)
+        assert self.telegram.await_count == 1
 
     # evento de auditoria y aviso, en ambos modos
     async def test_marcado_deja_evento_en_audit_y_avisa_en_ambos_modos(self):

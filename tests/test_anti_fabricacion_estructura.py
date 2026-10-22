@@ -17,7 +17,7 @@ import pytest
 from jax.anti_fabricacion import consecuencia, estructura
 from jax.anti_fabricacion.consecuencia import Modo, aplicar, leer_modo
 from jax.anti_fabricacion.estructura import (
-    LIMPIO, MARCADO, NO_CORRIO, NO_VERIFICABLE, verificar,
+    LIMPIO, MARCADO, NO_CORRIO, NO_VERIFICABLE, Previo, verificar,
 )
 from jax.anti_fabricacion.whitelist import Whitelist
 
@@ -118,7 +118,7 @@ def test_diff_sin_schema_en_texto_libre_tambien_se_lee_como_diff():
 def test_lo_que_el_diff_define_es_propio():
     diff = ("--- /dev/null\n+++ b/n.py\n@@ -0,0 +1,3 @@\n+class NuevaClase:\n+    pass\n+def hacer_cosa():\n+    pass\n")
     v = _v(diff + "\nUsa `NuevaClase` y `hacer_cosa`.")
-    assert v.estado == LIMPIO
+    assert v.estado == LIMPIO and {"NuevaClase", "hacer_cosa"} <= set(v.propuestos)
 
 
 # --- canal: texto libre ----------------------------------------------------------------
@@ -147,15 +147,25 @@ def test_punto_con_izquierda_que_no_es_tabla_no_es_candidato():
 
 def test_constante_real_y_funcion_sql_real_son_limpias():
     assert _v("el tope es `MAX_WRITE_BYTES` y se lee con `JSON_EXTRACT`").estado == LIMPIO
+    assert _v("el tope es `MAX_WRITE_BYTE_INVENTADO`").estado == LIMPIO  # fuera de alcance (regla 2)
 
 
-def test_simbolo_inventado_en_backticks_se_marca():
-    v = _v("implementa `AuditSink` Protocol")
-    assert v.estado == MARCADO and v.items[0].candidato == "AuditSink"
+def test_identificador_suelto_en_backticks_ya_no_es_candidato():
+    """Enmienda 1, regla 2: solo 4 formas son candidatas. `AuditSink` o
+    `calcular_total` (sin «/» ni «.») NO se revisan: límite declarado, esos casos
+    de U4 quedan como «fuera de alcance»."""
+    assert _v("implementa `AuditSink` Protocol y `calcular_total_bodegas`").estado == LIMPIO
+    assert _v("`bodegas` es una tabla").estado == LIMPIO
 
 
 def test_backticks_con_comandos_o_palabras_sueltas_no_se_revisan():
     assert _v("corre `git status --porcelain` y mira `true` y `foo`").estado == LIMPIO
+
+
+def test_archivo_suelto_sin_barra_tampoco_es_candidato():
+    wl = _wl(archivos=frozenset({"jax/core/x.py", "deploy/nginx.conf"}))
+    assert _v("mira `bodegas.conf` y `worker.py`", wl=wl).estado == LIMPIO
+    assert _v("mira `deploy/bodegas.conf`", wl=wl).estado == MARCADO
 
 
 def test_nombre_oculto_sin_directorio_no_es_candidato():
@@ -164,7 +174,6 @@ def test_nombre_oculto_sin_directorio_no_es_candidato():
     configuración de la máquina, no una afirmación sobre el repo."""
     wl = _wl(archivos=frozenset({"jax/core/x.py", "deploy/nginx.conf"}))
     assert _v("mira `.bak.conf` y `.env.conf`", wl=wl).estado == LIMPIO
-    assert _v("mira `bodegas.conf`", wl=wl).estado == MARCADO
 
 
 def test_ruta_absoluta_de_la_raiz_del_sistema_no_es_de_este_detector():
@@ -205,21 +214,40 @@ def test_candidato_en_oracion_con_signo_de_pregunta_es_hipotesis():
 
 
 def test_corpus_confiable_respalda_lo_que_la_persona_dijo():
-    objetivo = "Revisa services/bodegas.py y la clase AuditSink"
-    assert _v("miré `services/bodegas.py` y `AuditSink`", corpus=objetivo).estado == LIMPIO
+    objetivo = "Revisa services/bodegas.py y la tabla jacobs_steps"
+    assert _v("miré `services/bodegas.py`", corpus=objetivo).estado == LIMPIO
 
 
-def test_heredado_de_otro_modelo_no_es_limpio():
-    previo = "El paso anterior propuso implementar `AuditSink` Protocol"
-    v = _v("implementé `AuditSink`", previos=[previo])
+def test_heredado_sin_veredicto_del_origen_es_marcado():
+    previo = "El paso anterior creó `services/bodegas.py`"
+    v = _v("modifiqué `services/bodegas.py`", previos=[previo])
     assert v.estado == MARCADO and v.items[0].clase == "heredado"
-    solo_en_la_salida = _v("implementé `OtroInventado`", previos=[previo])
+    solo_en_la_salida = _v("modifiqué `services/otro.py`", previos=[previo])
     assert solo_en_la_salida.items[0].clase == "sin_respaldo"
 
 
+def test_heredado_cuyo_origen_tiene_veredicto_es_no_verificable_y_no_acusa():
+    """Enmienda 1, regla 3: visible, nunca limpio, no falla en duro."""
+    previo = Previo("El paso anterior creó `services/bodegas.py`", veredicto="limpio")
+    v = _v("modifiqué `services/bodegas.py`", previos=[previo])
+    assert v.estado == NO_VERIFICABLE and not v.items and "heredado" in v.no_verificables
+    assert not aplicar(v, Modo.DURO).fallar
+
+
 def test_la_salida_de_otro_modelo_nunca_respalda_aunque_el_corpus_la_cite():
-    v = _v("usé `AuditSink`", corpus="objetivo sin nada", previos=["...AuditSink..."])
+    v = _v("usé `services/bodegas.py`", corpus="objetivo sin nada", previos=["...services/bodegas.py..."])
     assert v.estado == MARCADO
+
+
+def test_ruta_no_encontrada_con_archivos_o_checkout_de_jax_caidos_es_no_verificable():
+    for cat in ("archivos", "jax_checkout"):
+        v = _v("edité `services/bodegas.py`", wl=_wl(no_disponibles=frozenset({cat})))
+        assert v.estado == NO_VERIFICABLE and cat in v.no_verificables and not v.items
+
+
+def test_veredicto_dice_si_cuenta_para_la_sombra():
+    assert estructura.no_corrio("x").como_dict()["cuenta_para_sombra"] is False
+    assert _v("nada").como_dict()["cuenta_para_sombra"] is True
 
 
 # --- forma del veredicto ----------------------------------------------------------------
