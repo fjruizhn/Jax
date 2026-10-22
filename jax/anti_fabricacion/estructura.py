@@ -230,6 +230,8 @@ def _clasificar_span(s: str, wl: Whitelist, exts: frozenset[str], raices: frozen
         if izq in wl.tablas and _IDENT.match(der):
             return ("tabla_columna", s)
         r = _normalizar_ruta(s)
+        if r.startswith("."):
+            return None  # dotfile suelto: configuración de la máquina, no una afirmación sobre el repo
         if _RUTA_CHARS.match(r) and PurePosixPath(r).suffix.lower() in exts:
             return ("ruta", r)
         return None

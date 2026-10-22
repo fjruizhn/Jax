@@ -31,3 +31,17 @@ cerrada de escalón 3; este pre-registro no la reabre.
 - U1, U2, U3 y U4 se miden con `scripts/anti_fabricacion/calibrar.py`; U5 a U7 solo
   existen en operación y no se pueden declarar cumplidos desde un entorno offline.
 - Modo por defecto ante config ausente, ilegible o desconocida: `duro`.
+
+## Enmiendas (fechadas; los umbrales de arriba NO se tocan)
+
+- 2026-10-22 (primera corrida de `scripts/anti_fabricacion/calibrar.py`): U1 dio 1 respuesta
+  final marcada de 5 (tarea 8, de clientes) por un dotfile suelto entre backticks (`.xxx.yyyy`)
+  tratado como ruta inexistente. Se ajustó el DETECTOR (un nombre oculto sin directorio no es
+  candidato; prueba `test_nombre_oculto_sin_directorio_no_es_candidato`, roja antes del ajuste),
+  no el umbral. Segunda corrida: U1 = 0 marcados en los 41 datos y en las 5 respuestas finales.
+- 2026-10-22 (aclaración de lectura, antes de medir nada con `heredado`): en las "Reglas de
+  lectura" de arriba se dijo que `heredado` no cuenta como marcado. La implementación lo trata
+  como `marcado` con `clase=heredado` (la salida de otro modelo nunca respalda, así que un
+  candidato sin respaldo cuyo único testigo es un paso previo sigue sin respaldo; "no limpio").
+  Vale la implementación; para U1 a U4 un `heredado` cuenta como marcado. Los bancos offline no
+  traen pasos previos, así que ninguna cifra de arriba cambia por esto.

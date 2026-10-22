@@ -158,6 +158,15 @@ def test_backticks_con_comandos_o_palabras_sueltas_no_se_revisan():
     assert _v("corre `git status --porcelain` y mira `true` y `foo`").estado == LIMPIO
 
 
+def test_nombre_oculto_sin_directorio_no_es_candidato():
+    """Hallazgo de calibración (U1, 2026-10-22): `.bak.conf` en una respuesta de
+    infraestructura se marcaba como ruta inexistente. Un dotfile suelto es
+    configuración de la máquina, no una afirmación sobre el repo."""
+    wl = _wl(archivos=frozenset({"jax/core/x.py", "deploy/nginx.conf"}))
+    assert _v("mira `.bak.conf` y `.env.conf`", wl=wl).estado == LIMPIO
+    assert _v("mira `bodegas.conf`", wl=wl).estado == MARCADO
+
+
 def test_ruta_absoluta_de_la_raiz_del_sistema_no_es_de_este_detector():
     assert _v("lee `/etc/jax/.env` y /srv/jax-data/x.json").estado == LIMPIO
 
