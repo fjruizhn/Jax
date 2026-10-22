@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import uuid
 from decimal import Decimal
@@ -221,6 +222,54 @@ async def _ready_pipeline():
     snapshot = await store.office_execution_snapshot(pid); assert snapshot
     pipeline = await store.office_pipeline_for_runner(pid); assert pipeline
     return pid, snapshot, pipeline
+
+
+@pytest.mark.parametrize("callback_outcome,terminal", [
+    ("FAILED", OfficePhase.FAILED),
+    ("CANCELLED_REVOKED", OfficePhase.CANCELLED_REVOKED),
+    ("OUTCOME_UNKNOWN", OfficePhase.OUTCOME_UNKNOWN),
+])
+def test_surrogate_provider_json_fails_generation_and_reconciles_real_terminal(monkeypatch, callback_outcome, terminal):
+    """A legal JSON escape may decode to an invalid strict-UTF8 Python str."""
+    from jacobs import office_callbacks
+    from jacobs.office_runtime import parse_office_provider_response
+    monkeypatch.setenv("JAX_OFFICE_EXECUTION_ENABLED", "true"); monkeypatch.setenv("JAX_OFFICE_PAIRED_CONTRACT_VERSION", OFFICE_WORK_CONTRACT_VERSION)
+    monkeypatch.setenv("JAX_OFFICE_CALLBACK_BASE_URL", "https://paired.test"); monkeypatch.setenv("JAX_OFFICE_CALLBACK_TIMEOUT_SECONDS", "10"); monkeypatch.setenv("JAX_OFFICE_CALLBACK_MAX_RESPONSE_BYTES", "1024")
+    office_callbacks.clear_office_callback_config_cache()
+    async def run():
+        pid, snapshot, pipeline = await _ready_pipeline(); seen = {}
+        materialized = SimpleNamespace(outcome="MATERIALIZED", prompt="p", materialization_sha256="b" * 64, binding_version=1)
+        async def handler(request):
+            seen.update(json.loads(request.content))
+            return httpx.Response(200, json={"outcome": callback_outcome,
+                                              "contract_version": OFFICE_WORK_CONTRACT_VERSION})
+        async def dispatch(step, pipeline, prompt):
+            step.modelo_real = "catalog-model"
+            parsed = parse_office_provider_response(json.loads(
+                '{"choices":[{"message":{"content":"\\ud800"}}]}'), "http_openai_compat")
+            return {"result": parsed.text}
+        try:
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+                with patch.object(office_callbacks, "obtener_cliente_http", lambda: client), \
+                     patch.object(office_callbacks, "encabezado_propio", lambda i: {"X": "s"}), \
+                     patch.object(office_callbacks, "ensure_office_http_log_privacy", lambda: None), \
+                     patch.object(executor, "office_materialize", AsyncMock(return_value=materialized)), \
+                     patch.object(executor, "_dispatch_step", AsyncMock(side_effect=dispatch)) as provider, \
+                     patch.object(executor, "office_complete", AsyncMock(side_effect=AssertionError("complete"))) as complete:
+                    await executor.run_pipeline(pipeline)
+            provider.assert_awaited_once()
+            complete.assert_not_awaited()
+            final = await store.office_execution_snapshot(pid)
+            assert final and final.phase is terminal
+            assert final.rejection_code == "OFFICE_PROVIDER_RESPONSE_INVALID"
+            assert seen["phase"] == "GENERATION"
+            assert seen["code"] == "OFFICE_PROVIDER_RESPONSE_INVALID"
+            assert seen["model_invoked"] is True and seen["output_sha256"] is None
+            assert "output_json" not in seen
+            assert final.receipt is None and final.modelo_real is None
+        finally:
+            await _clean(pid)
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("ack", ["false", "raise"])

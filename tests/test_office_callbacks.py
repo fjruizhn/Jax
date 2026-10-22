@@ -179,6 +179,32 @@ def test_complete_any_post_attempt_failure_is_ambiguous(monkeypatch, status):
     assert caught.value.ambiguous and caught.value.effect_may_have_committed
 
 
+@pytest.mark.parametrize("status,body", [
+    (409, b"{}"), (422, b"{}"), (503, b"{}"), (200, b'{"not":"a completion dto"}'),
+])
+def test_complete_real_transport_errors_are_delivery_ambiguous(monkeypatch, status, body):
+    """Actual callback transport: every post-attempt failure reconciles."""
+    from jacobs import office_callbacks
+    _callback_env(monkeypatch); office_callbacks.clear_office_callback_config_cache()
+    pipeline_id = str(uuid.uuid4())
+    from jacobs.office_contract import deterministic_step_id, deterministic_correlation_id
+    snapshot = SimpleNamespace(pipeline_id=pipeline_id, run_epoch=0,
+        step_id=deterministic_step_id(pipeline_id), correlation_id=deterministic_correlation_id(pipeline_id),
+        request_sha256="a" * 64, office_stage_id=str(uuid.uuid4()))
+    async def handler(request):
+        return httpx.Response(status, content=body)
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            monkeypatch.setattr(office_callbacks, "obtener_cliente_http", lambda: client)
+            monkeypatch.setattr(office_callbacks, "encabezado_propio", lambda identity: {"X": "secret"})
+            monkeypatch.setattr(office_callbacks, "ensure_office_http_log_privacy", lambda: None)
+            with pytest.raises(office_callbacks.OfficeCallbackError) as caught:
+                await office_callbacks.complete(snapshot, '{"safe":true}', "catalog-model")
+            return caught.value
+    error = asyncio.run(run())
+    assert error.ambiguous and error.effect_may_have_committed
+
+
 @pytest.mark.parametrize("phase,invoked,outcome", [
     ("GENERATION", False, "FAILED"), ("GENERATION", True, "OUTCOME_UNKNOWN"),
     ("DELIVERY", True, "CANCELLED_REVOKED"),

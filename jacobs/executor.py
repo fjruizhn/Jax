@@ -1389,6 +1389,7 @@ async def _correr_office_pipeline(pipeline: Pipeline) -> None:
     if check_kill_switch():
         return
     output: str | None = None
+    output_sha256: str | None = None
     modelo_real: str | None = None
     claimed_delivery = False
     try:
@@ -1428,7 +1429,14 @@ async def _correr_office_pipeline(pipeline: Pipeline) -> None:
         if type(modelo_real) is not str or not modelo_real:
             raise OfficeExecutionError(OfficeRejectionCode.OFFICE_PROVIDER_RESPONSE_INVALID,
                                        provider_call_made=True)
-        output_sha256 = office_utf8_sha256(output)
+        try:
+            output_sha256 = office_utf8_sha256(output)
+        except ValueError:
+            raise OfficeExecutionError(
+                OfficeRejectionCode.OFFICE_PROVIDER_RESPONSE_INVALID,
+                phase=OfficeErrorPhase.GENERATION,
+                provider_call_made=True,
+            ) from None
         response = await office_complete(snapshot, output, modelo_real)
         if response.outcome == "STORED":
             if response.receipt.output_sha256 != output_sha256:
@@ -1452,7 +1460,7 @@ async def _correr_office_pipeline(pipeline: Pipeline) -> None:
                                              OfficePhase.CANCELLED_REVOKED)
     except OfficeExecutionError as exc:
         await _office_failure(snapshot, exc.code, exc.provider_call_made,
-                              office_utf8_sha256(output) if type(output) is str else None,
+                              output_sha256,
                               from_phase=(OfficePhase.DELIVERY_IN_FLIGHT if claimed_delivery else OfficePhase.READY),
                               model_real=modelo_real,
                               fail_phase=exc.phase.value,
@@ -1463,13 +1471,13 @@ async def _correr_office_pipeline(pipeline: Pipeline) -> None:
             # durable READY is the recovery record and provider is untouched.
             return
         await _office_failure(snapshot, OfficeRejectionCode.OFFICE_DELIVERY_OUTCOME_UNKNOWN,
-                              True, office_utf8_sha256(output) if type(output) is str else None,
+                              True, output_sha256,
                               from_phase=OfficePhase.DELIVERY_IN_FLIGHT, model_real=modelo_real,
                               fail_phase=OfficeErrorPhase.DELIVERY.value,
                               ambiguous=True)
     except Exception:
         await _office_failure(snapshot, OfficeRejectionCode.OFFICE_EXECUTION_FAILED,
-                              claimed_delivery, office_utf8_sha256(output) if type(output) is str else None,
+                              claimed_delivery, output_sha256,
                               from_phase=(OfficePhase.DELIVERY_IN_FLIGHT if claimed_delivery else OfficePhase.READY),
                               model_real=modelo_real,
                               fail_phase=OfficeErrorPhase.GENERATION.value,
