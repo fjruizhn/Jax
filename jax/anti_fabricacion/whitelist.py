@@ -42,7 +42,7 @@ en el mismo commit que la crea).
     versionados aportan SOLO la ruta; los símbolos (ast) salen solo de versionados. El
     checkout desplegado de jax es fuente opcional: solo `git ls-files`. La huella de
     `git status` descarta lo que está bajo EXCLUSIONES (el daemon de Ruflo escribe en
-    `.claude-flow/` sin parar y antes invalidaba el memo en cada job), y usa
+    su directorio de estado sin parar y antes invalidaba el memo en cada job), y usa
     `--ignored` para que un archivo nuevo ignorado por git también invalide. El SHA del
     checkout de jax no está en la clave: cambia con un despliegue, que reinicia el proceso.
   * Caché de `ast`: por SHA de blob (`_CACHE_AST`). Un blob con el mismo SHA
@@ -93,8 +93,9 @@ _TIMEOUT_GIT_S = 30
 #: Enmienda 1 (2026-10-22), regla 1: UNA constante de exclusiones, compartida por el
 #: recorrido del árbol en disco y por la huella de `git status` (regla 6). Son
 #: directorios de estado/dependencias que cambian solos (el daemon de Ruflo escribe
-#: en `.claude-flow/` sin parar) y no son afirmaciones sobre el trabajo.
-EXCLUSIONES = frozenset({".git", ".claude-flow", "node_modules", ".venv", "__pycache__"})
+#: en su directorio de estado sin parar) y no son afirmaciones sobre el trabajo.
+#: Definida en exclusiones.py (sin subprocesos) y re-exportada aquí.
+from .exclusiones import EXCLUSIONES  # noqa: E402
 #: Tope de entradas del recorrido en disco. Si se pasa, la categoría `archivos` es
 #: `no_verificable`: nunca se da por limpio un árbol que no se pudo ver entero.
 TOPE_ENTRADAS = 20000
@@ -205,7 +206,7 @@ def _excluido(ruta: str) -> bool:
 
 def _estado_sin_exclusiones(salida: bytes) -> bytes:
     """`git status --porcelain -z` sin las rutas bajo EXCLUSIONES (regla 6): lo que
-    cambia dentro de `.claude-flow/` no invalida el memo. Un renombre/copia trae un
+    cambia dentro de un directorio excluido no invalida el memo. Un renombre/copia trae un
     registro extra (la ruta de origen) que se descarta junto con el suyo."""
     registros = salida.split(b"\0")
     kept, i = [], 0

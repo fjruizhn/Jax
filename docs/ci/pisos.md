@@ -959,13 +959,12 @@ matriz parametrizada de esa ronda se retiró al volver al scanner de `68557946`;
 sus exclusiones de `docker exec/run` suprimían marcas que master sí hacía. El
 piso se vuelve a fijar desde los **3537 de master**.
 
-3887 -> 3963 (2026-10-22, anti-fabricacion capas 2 y 4): +76 en cuatro archivos nuevos del paso 'Piso
-exacto' (`tests/test_anti_fabricacion_whitelist.py` 16, `tests/test_anti_fabricacion_estructura.py` 42,
-`tests/test_anti_fabricacion_entrega.py` 9, `las_manos/_worker_estructura_test.py` 9). Medido LOCAL en
+3887 -> 3976 (2026-10-22, anti-fabricacion capas 2 y 4, con la Enmienda 1): +89 en cuatro archivos nuevos del paso 'Piso
+exacto' (`tests/test_anti_fabricacion_whitelist.py` 23, `tests/test_anti_fabricacion_estructura.py` 47,
+`tests/test_anti_fabricacion_entrega.py` 9, `las_manos/_worker_estructura_test.py` 10). Medido LOCAL en
 hall9000, con el comando literal del paso (`PYTHONPATH=.:las_manos`, sin `JAX_DB_HOST`) sobre `origin/master`
-(031f7b7b) y sobre la rama: 3927 passed, 3 skipped, 3 xfailed -> 4002 passed (+75, medido antes de sumar el
-test de import pelado) y +1 de ese test = +76. **Es medicion local, NO del runner**: los 45 skipped solo
-se verifican alli (local: 3), asi que el 3963 y el "45 skipped" quedan a confirmar en la primera corrida
+(031f7b7b) y sobre la rama: 3927 passed, 3 skipped, 3 xfailed -> 4016 passed (+89), re-medido tras la Enmienda 1. **Es medicion local, NO del runner**: los 45 skipped solo
+se verifican alli (local: 3), asi que el 3976 y el "45 skipped" quedan a confirmar en la primera corrida
 de CI. Ningun test nuevo salta. Ningun otro piso cambia: `tests-puros` es el unico job que corre
 `worker.py` y los cuatro archivos nuevos.
 

@@ -340,3 +340,9 @@ def test_modo_lee_axioma_config_y_todo_lo_raro_es_duro(fila, esperado):
 
 def test_modo_con_la_base_ilegible_es_duro():
     assert asyncio.run(leer_modo(_conectar(falla=True))) == Modo.DURO
+
+
+def test_la_constante_de_exclusiones_es_una_sola_y_dice_lo_que_la_enmienda():
+    from jax.anti_fabricacion import exclusiones, whitelist
+    assert exclusiones.EXCLUSIONES == frozenset({".git", ".claude-flow", "node_modules", ".venv", "__pycache__"})
+    assert whitelist.EXCLUSIONES is exclusiones.EXCLUSIONES

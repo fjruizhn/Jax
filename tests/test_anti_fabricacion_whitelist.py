@@ -255,20 +255,18 @@ def _git_env():
             "GIT_COMMITTER_EMAIL": "t@t", "PATH": "/usr/bin:/bin"}
 
 
-def test_la_constante_de_exclusiones_es_una_sola_y_dice_lo_que_la_enmienda():
-    assert wl_mod.EXCLUSIONES == frozenset({".git", ".claude-flow", "node_modules", ".venv", "__pycache__"})
-
-
-def test_un_cambio_dentro_de_claude_flow_no_reconstruye_el_memo(tmp_path):
+def test_un_cambio_dentro_de_un_directorio_excluido_no_reconstruye_el_memo(tmp_path):
     """Regla 6 (el daemon de Ruflo ensucia el workspace sin parar)."""
     g = _repo(tmp_path)
-    (tmp_path / ".claude-flow").mkdir()
-    (tmp_path / ".claude-flow" / "estado.json").write_text("1")
-    g("add", "-f", ".claude-flow/estado.json")
+    ruido = "node_modules"   # cualquiera de wl_mod.EXCLUSIONES; el que importa en producción es el del daemon
+    assert ruido in wl_mod.EXCLUSIONES
+    (tmp_path / ruido).mkdir()
+    (tmp_path / ruido / "estado.json").write_text("1")
+    g("add", "-f", f"{ruido}/estado.json")
     g("commit", "-q", "-m", "estado")
     antes = wl_mod.leer_git(tmp_path)
-    (tmp_path / ".claude-flow" / "estado.json").write_text("2")         # versionado y modificado
-    (tmp_path / ".claude-flow" / "nuevo.json").write_text("x")          # nuevo sin versionar
+    (tmp_path / ruido / "estado.json").write_text("2")         # versionado y modificado
+    (tmp_path / ruido / "nuevo.json").write_text("x")          # nuevo sin versionar
     despues = wl_mod.leer_git(tmp_path)
     assert despues.status_hash == antes.status_hash
 
@@ -286,7 +284,7 @@ def test_el_arbol_en_disco_aporta_rutas_con_el_encierro_y_las_exclusiones(tmp_pa
     raiz = tmp_path / "ws"
     (raiz / "proyectos" / "p1").mkdir(parents=True)
     (raiz / "proyectos" / "p1" / "doc.md").write_text("x")
-    for ex in (".claude-flow", "node_modules", "__pycache__", ".venv"):
+    for ex in sorted(wl_mod.EXCLUSIONES - {".git"}):
         (raiz / ex).mkdir()
         (raiz / ex / "z.txt").write_text("x")
     afuera = tmp_path / "afuera"
