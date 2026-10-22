@@ -11,6 +11,7 @@ to this module documents why 005 does not repeat it).
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 PROJECT_AUTHORITY_DDL = (
@@ -120,6 +121,32 @@ _IDX_SCOPE_NAMESPACE_TENANT_STATUS_PROJECT = "idx_jax_project_scope_namespace_te
 # it without a gap between the equality predicates and the ordered cursor.
 _IDX_SCOPE_NAMESPACE_STATUS_PROJECT = "idx_jax_project_scope_namespace_status_project"
 
+_MANAGED_INDEXES: dict[tuple[str, str], tuple[tuple[str, ...], bool]] = {
+    ("jax_project_scope", _IDX_SCOPE_NAMESPACE_TENANT_STATUS_PROJECT):
+        (("authorization_namespace", "tenant_id", "status", "project_id"), False),
+    ("jax_project_scope", _IDX_SCOPE_NAMESPACE_STATUS_PROJECT):
+        (("authorization_namespace", "status", "project_id"), False),
+    ("jax_project_membership", _IDX_MEMBERSHIP_USER_LIST):
+        (("tenant_id", "user_id", "status", "project_id"), False),
+    ("jax_namespace_membership_mutation_request", _UQ_NAMESPACE_MEMBERSHIP_INVITATION):
+        (("namespace", "invitation_id"), True),
+    ("jax_users", _IDX_USERS_TENANT_ROLE_STATUS): (("tenant_id", "role", "status"), False),
+    ("jax_users", _IDX_USERS_TENANT_EMAIL): (("tenant_id", "email"), False),
+}
+
+_MANAGED_CHECKS = {
+    _CHK_SCOPE_STATUS_V1: "status IN ('ACTIVE','DISABLED')",
+    _CHK_SCOPE_STATUS_V2: "status IN ('ACTIVE','ARCHIVED','HIDDEN','DISABLED')",
+    _CHK_SCOPE_NAMESPACE: "authorization_namespace IN ('CLASSIC','OFFICE_CONFIDENTIAL')",
+    _CHK_MEMBERSHIP_ORIGIN: "grant_origin IN ('EXPLICIT','CREATOR','TENANT_ADMIN')",
+    _CHK_MEMBERSHIP_ORIGIN_V2: "grant_origin IN ('EXPLICIT','CREATOR','TENANT_ADMIN','OFFICE')",
+    _CHK_MEMBERSHIP_PRE_ADMIN: "(pre_admin_role IS NULL AND pre_admin_status IS NULL) OR (grant_origin='TENANT_ADMIN' AND pre_admin_role IN ('VIEWER','CONTRIBUTOR','REVIEWER','OWNER') AND pre_admin_status IN ('ACTIVE','REVOKED'))",
+    _CHK_NAMESPACE_MEMBERSHIP_EXECUTION: "(execution_kind='INTERACTIVE_USER' AND invitation_id IS NULL) OR (execution_kind='INVITATION_ACCEPTANCE' AND invitation_id IS NOT NULL)",
+    _CHK_NAMESPACE_MEMBERSHIP_RESULT: "project_role IN ('VIEWER','CONTRIBUTOR') AND status IN ('ACTIVE','REVOKED') AND changed=1",
+    _CHK_NAMESPACE_MEMBERSHIP_RESULT_V2: "project_role IN ('VIEWER','CONTRIBUTOR','REVIEWER','OWNER') AND status IN ('ACTIVE','REVOKED') AND changed=1",
+    _CHK_NAMESPACE_MEMBERSHIP_RESULT_V4: "((operation='GRANT_OFFICE_MEMBER' AND member_kind IS NOT NULL AND member_kind='INTERNAL' AND project_role='CONTRIBUTOR' AND status='ACTIVE') OR (operation='GRANT_OFFICE_MEMBER' AND member_kind IS NOT NULL AND member_kind='EXTERNAL_CLIENT' AND project_role='VIEWER' AND status='ACTIVE') OR (operation='REVOKE_OFFICE_MEMBER' AND member_kind IS NULL AND project_role IN ('VIEWER','CONTRIBUTOR','REVIEWER','OWNER') AND status='REVOKED')) AND changed=1",
+}
+
 _LEGACY_STATUS_ENUM = "ENUM('planning','active','paused','completed','archived')"
 _LIFECYCLE_STATUS_ENUM = ("ENUM('planning','active','paused','completed','archived','hidden','disabled') "
                           "DEFAULT 'planning'")
@@ -166,16 +193,36 @@ def _scalar(row: Any) -> int:
 
 async def _check_constraint_exists(cursor: Any, name: str) -> bool:
     await cursor.execute(
-        "SELECT COUNT(*) AS n FROM information_schema.CHECK_CONSTRAINTS "
+        "SELECT CHECK_CLAUSE FROM information_schema.CHECK_CONSTRAINTS "
         "WHERE CONSTRAINT_SCHEMA=DATABASE() AND CONSTRAINT_NAME=%s", (name,))
-    return _scalar(await cursor.fetchone()) > 0
+    row = await cursor.fetchone()
+    if row is None:
+        return False
+    expected = _MANAGED_CHECKS.get(name)
+    if expected is not None:
+        actual = _field(row, "CHECK_CLAUSE", 0)
+        # MariaDB renders string literals with a charset introducer in
+        # information_schema (for example ``_utf8mb4'ACTIVE'``); it does not
+        # change the CHECK semantics and must not make a fresh schema look
+        # drifted.
+        normalize = lambda value: re.sub(r"_UTF8MB4|[\s`]+", "", str(value).upper())
+        if normalize(actual) != normalize(expected):
+            raise RuntimeError(f"cannot migrate project authority: {name} has an unexpected CHECK expression")
+    return True
 
 
 async def _index_exists(cursor: Any, table: str, name: str) -> bool:
-    await cursor.execute(
-        "SELECT COUNT(*) AS n FROM information_schema.STATISTICS "
-        "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND INDEX_NAME=%s", (table, name))
-    return _scalar(await cursor.fetchone()) > 0
+    expected = _MANAGED_INDEXES.get((table, name))
+    if expected is None:
+        await cursor.execute(
+            "SELECT COUNT(*) AS n FROM information_schema.STATISTICS "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND INDEX_NAME=%s", (table, name))
+        return _scalar(await cursor.fetchone()) > 0
+    columns, unique = expected
+    shape = await _index_shape(cursor, table, name, columns, unique=unique)
+    if shape == "drifted":
+        raise RuntimeError(f"cannot migrate project authority: {name} has an unexpected definition")
+    return shape == "exact"
 
 
 def _field(row: Any, name: str, position: int) -> Any:
@@ -183,7 +230,7 @@ def _field(row: Any, name: str, position: int) -> Any:
 
 
 async def _index_shape(cursor: Any, table: str, name: str,
-                       columns: tuple[str, ...]) -> str:
+                       columns: tuple[str, ...], *, unique: bool = False) -> str:
     """Return ``absent``, ``exact``, or ``drifted`` for a managed index.
 
     Index names are part of this migration's schema contract.  Treating a
@@ -208,15 +255,15 @@ async def _index_shape(cursor: Any, table: str, name: str,
     if not rows:
         return "absent"
     actual_columns = tuple(str(_field(row, "COLUMN_NAME", 0)) for row in rows)
-    btree_non_unique_full_columns = all(
+    btree_and_cardinality = all(
         _field(row, "SUB_PART", 1) is None
-        and int(_field(row, "NON_UNIQUE", 2)) == 1
+        and int(_field(row, "NON_UNIQUE", 2)) == (0 if unique else 1)
         and str(_field(row, "INDEX_TYPE", 3)).upper() == "BTREE"
         for row in rows)
     not_ignored = (not has_ignored_metadata or all(
         str(_field(row, "IGNORED", 4)).upper() in ("", "0", "NO", "FALSE")
         for row in rows))
-    return "exact" if actual_columns == columns and btree_non_unique_full_columns and not_ignored else "drifted"
+    return "exact" if actual_columns == columns and btree_and_cardinality and not_ignored else "drifted"
 
 
 async def _column_type(cursor: Any, table: str, column: str) -> str | None:

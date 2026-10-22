@@ -392,6 +392,37 @@ async def test_completar_registra_las_filas_que_faltan_y_es_idempotente(tmp_path
 
 @requiere_servidor
 @asincrono
+async def test_completar_no_escribe_documentos_en_un_proyecto_office(tmp_path, capsys):
+    dueno = await _dueno()
+    _armar(tmp_path)
+    assert await asyncio.to_thread(_correr, tmp_path, dueno, "--aplicar") == 0
+    resultado = _salida(capsys)
+    pid = resultado["project_id"]
+    await _sql("DELETE FROM project_documents WHERE project_id=%s", (pid,))
+    await _sql("UPDATE jax_project_scope SET authorization_namespace='OFFICE_CONFIDENTIAL' WHERE project_id=%s", (pid,))
+    assert await asyncio.to_thread(_completar, Path(resultado["mapa"])) == 1
+    assert "namespace CLASSIC" in capsys.readouterr().err
+    assert len(await _filas(pid)) == 0
+
+
+@requiere_servidor
+@asincrono
+async def test_revertir_no_borra_ni_mueve_un_proyecto_office(tmp_path, capsys):
+    dueno = await _dueno()
+    _armar(tmp_path)
+    assert await asyncio.to_thread(_correr, tmp_path, dueno, "--aplicar") == 0
+    resultado = _salida(capsys)
+    pid = resultado["project_id"]
+    antes = await _filas(pid)
+    await _sql("UPDATE jax_project_scope SET authorization_namespace='OFFICE_CONFIDENTIAL' WHERE project_id=%s", (pid,))
+    assert await asyncio.to_thread(_revertir, tmp_path, Path(resultado["mapa"])) == 1
+    assert "namespace CLASSIC" in capsys.readouterr().err
+    assert (tmp_path / "proyectos" / resultado["project_uuid"]).is_dir()
+    assert len(await _filas(pid)) == len(antes)
+
+
+@requiere_servidor
+@asincrono
 async def test_completar_con_sha_distinto_no_registra(tmp_path, capsys):
     dueno = await _dueno()
     _armar(tmp_path)

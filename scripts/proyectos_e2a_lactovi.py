@@ -74,7 +74,7 @@ from jax.core.db_connect_config import db_connect_timeout_seconds  # noqa: E402
 from jax.memory.b9 import MutationAuthorizationRequest, ScopeContext, Visibility  # noqa: E402
 from jax.memory.b9_mariadb import MariaDBB9Store  # noqa: E402
 from jax.memory.project_authority import ProjectAuthorityAdmin  # noqa: E402
-from jax.memory.scope_authority import ProjectLifecycle  # noqa: E402
+from jax.memory.scope_authority import ProjectLifecycle, ProjectNamespace  # noqa: E402
 from procesamiento.compuerta import tiene_extractor  # noqa: E402
 from procesamiento.ficha import Ficha, sha256_de  # noqa: E402
 
@@ -254,6 +254,24 @@ async def _estado_alcance(pool, project_id: int) -> str | None:
     return str(fila["status"]).upper() if fila else None
 
 
+async def _exigir_alcance_classic_en_transaccion(cursor, project_id: int) -> None:
+    """Lock the authoritative scope before this legacy tool changes data or disk.
+
+    LACTOVI is a CLASSIC-only migration tool.  A status-only read is not an
+    authority check: an OFFICE project can also be ACTIVE.  The namespace is
+    read under the same transaction that performs the document mutation so a
+    concurrent namespace change cannot create a classic-document write path.
+    """
+    await cursor.execute(
+        "SELECT authorization_namespace FROM jax_project_scope WHERE project_id=%s FOR UPDATE",
+        (project_id,))
+    fila = await cursor.fetchone()
+    namespace = None if fila is None else str(fila["authorization_namespace"]).upper()
+    if namespace != ProjectNamespace.CLASSIC.value:
+        raise EstadoImpide(
+            f"el proyecto {project_id} no pertenece al namespace CLASSIC; LACTOVI no modifica Office")
+
+
 _INSERT = ("INSERT IGNORE INTO project_documents (project_id,sha256,nombre_original,ruta_entrada,"
            "carpeta_procesado,bytes,tipo,estado,job_id,subido_por) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,NULL,%s)")
 
@@ -311,12 +329,15 @@ async def ensayar(pool, args) -> dict:
             "mapa_previsto": str(mapa), "carpeta_actual": str(base), "estados": dict(sorted(estados.items()))}
 
 
-async def _registrar(pool, project_id: int, filas: list[dict]) -> int:
+async def _registrar(pool, project_id: int, filas: list[dict], *, exigir_classic: bool = False) -> int:
     """Las filas en UNA transaccion. Un fallo ANTES del commit hace rollback y se relanza tal cual
     (quien llama decide). Un fallo DEL commit tiene desenlace desconocido: CommitIncierto."""
     async with pool.acquire() as conn:
         await conn.begin()
         try:
+            if exigir_classic:
+                async with conn.cursor() as cur:
+                    await _exigir_alcance_classic_en_transaccion(cur, project_id)
             insertadas = await _insertar(conn, project_id, filas)
         except BaseException:
             await conn.rollback()
@@ -441,7 +462,7 @@ async def completar(pool, ruta_mapa: str) -> dict:
     if plan["hashes"] != mapa["sha256_antes"]:
         raise ShaNoCuadra("los sha256 de fuente/ no son los del mapa; no se registro nada")
     filas = _filas(plan, uid, mapa["dueno_user_id"])
-    insertadas = await _registrar(pool, pid, filas)
+    insertadas = await _registrar(pool, pid, filas, exigir_classic=True)
     return {"completado": True, "project_id": pid, "project_uuid": uid, **_resumen(plan),
             "filas_esperadas": len(filas), "filas_insertadas_ahora": insertadas}
 
@@ -464,6 +485,7 @@ async def revertir(pool, ruta_mapa: str) -> dict:
         movida = False
         try:
             async with conn.cursor() as cur:
+                await _exigir_alcance_classic_en_transaccion(cur, pid)
                 await cur.execute("SELECT COUNT(*) AS n FROM project_documents WHERE project_id=%s "
                                   "AND estado IN ('pendiente','procesando') FOR UPDATE", (pid,))
                 en_vuelo = int((await cur.fetchone())["n"])

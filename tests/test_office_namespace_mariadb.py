@@ -379,6 +379,40 @@ async def test_office_root_list_prefix_index_drift_fails_closed_and_rollback_pre
 
 @requires_test_db
 @_async
+async def test_migration_rejects_same_name_check_and_unique_index_drift_before_ddl():
+    """A homonymous constraint/index is not proof of the authority contract."""
+    name = f"{_DB}_office_homonym_{uuid.uuid4().hex[:10]}"
+    assert es_base_de_test(name)
+    await _setup(name)
+    conn = await aiomysql.connect(db=name, autocommit=True, cursorclass=aiomysql.DictCursor,
+                                  connect_timeout=db_connect_timeout_seconds(), **_params())
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute("ALTER TABLE jax_project_scope DROP CONSTRAINT chk_jax_project_scope_namespace")
+            await cur.execute("ALTER TABLE jax_project_scope ADD CONSTRAINT chk_jax_project_scope_namespace "
+                              "CHECK (authorization_namespace IN ('CLASSIC','OFFICE_CONFIDENTIAL','FOREIGN'))")
+            await cur.execute("SHOW CREATE TABLE jax_project_scope")
+            before = (await cur.fetchone())["Create Table"]
+            with pytest.raises(RuntimeError, match="unexpected CHECK expression"):
+                await apply_project_authority_migration(cur)
+            await cur.execute("SHOW CREATE TABLE jax_project_scope")
+            assert (await cur.fetchone())["Create Table"] == before
+            await cur.execute("ALTER TABLE jax_project_scope DROP CONSTRAINT chk_jax_project_scope_namespace")
+            await cur.execute("ALTER TABLE jax_project_scope ADD CONSTRAINT chk_jax_project_scope_namespace "
+                              "CHECK (authorization_namespace IN ('CLASSIC','OFFICE_CONFIDENTIAL'))")
+            await cur.execute("DROP INDEX uq_jax_namespace_membership_mutation_invitation "
+                              "ON jax_namespace_membership_mutation_request")
+            await cur.execute("CREATE INDEX uq_jax_namespace_membership_mutation_invitation "
+                              "ON jax_namespace_membership_mutation_request (namespace,invitation_id)")
+            with pytest.raises(RuntimeError, match="unexpected definition"):
+                await apply_project_authority_migration(cur)
+    finally:
+        conn.close()
+        await _drop(name)
+
+
+@requires_test_db
+@_async
 async def test_office_same_key_concurrency_creates_one_project_and_stable_replay():
     """Catches duplicate-key handling that leaves concurrent retries failing."""
     name = f"{_DB}_office_{uuid.uuid4().hex[:10]}"
