@@ -288,8 +288,11 @@ def test_office_connect_failure_is_a_known_non_delivery_outcome():
     ("transport", "payload", "expected"),
     [
         ("http_openai_compat", {"choices": [], "usage": {"prompt_tokens": 13, "completion_tokens": "bad"}}, (13, 0)),
+        ("http_openai_compat", {"choices": [], "usage": {"prompt_tokens": "bad", "completion_tokens": 17}}, (0, 17)),
         ("ollama", {"message": {}, "prompt_eval_count": 14, "eval_count": "bad"}, (14, 0)),
+        ("ollama", {"message": {}, "prompt_eval_count": "bad", "eval_count": 18}, (0, 18)),
         ("http_gemini", {"candidates": [], "usageMetadata": {"promptTokenCount": 15, "candidatesTokenCount": "bad"}}, (15, 0)),
+        ("http_gemini", {"candidates": [], "usageMetadata": {"promptTokenCount": "bad", "candidatesTokenCount": 19}}, (0, 19)),
     ],
 )
 def test_valid_usage_survives_a_later_or_sibling_counter_rejection(transport, payload, expected):
@@ -297,6 +300,24 @@ def test_valid_usage_survives_a_later_or_sibling_counter_rejection(transport, pa
         runtime.parse_office_provider_response(payload, transport)
     assert raised.value.code is OfficeRejectionCode.OFFICE_PROVIDER_RESPONSE_INVALID
     assert (raised.value.tokens_in, raised.value.tokens_out) == expected
+
+
+@pytest.mark.parametrize("bad", [False, -1])
+def test_usage_counters_reject_bool_and_negative_values_without_losing_valid_peer(bad):
+    with pytest.raises(OfficeExecutionError) as raised:
+        runtime.parse_office_provider_response(
+            {"choices": [], "usage": {"prompt_tokens": bad, "completion_tokens": 20}},
+            "http_openai_compat",
+        )
+    assert (raised.value.tokens_in, raised.value.tokens_out) == (0, 20)
+
+
+def test_zero_usage_is_a_valid_counter_value():
+    response = runtime.parse_office_provider_response(
+        {"choices": [{"message": {"content": "ok"}}], "usage": {"prompt_tokens": 0, "completion_tokens": 0}},
+        "http_openai_compat",
+    )
+    assert (response.tokens_in, response.tokens_out) == (0, 0)
 
 
 @pytest.mark.asyncio

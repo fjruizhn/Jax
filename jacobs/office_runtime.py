@@ -106,15 +106,21 @@ def _validate_optional_model(value: object, tokens_in: int, tokens_out: int) -> 
         raise _response_invalid(tokens_in, tokens_out)
 
 
-def _usage_value(container: object, key: str, *, tokens_in: int = 0, tokens_out: int = 0) -> int:
+def _usage_pair(container: object, input_key: str, output_key: str) -> tuple[int, int]:
+    """Validate both counters before rejecting either, retaining safe partial usage."""
     if container is None:
-        return 0
+        return 0, 0
     if type(container) is not dict:
-        raise _response_invalid(tokens_in, tokens_out)
-    value = container.get(key, 0)
-    if type(value) is not int or value < 0 or value > _MAX_USAGE_TOKENS:
-        raise _response_invalid(tokens_in, tokens_out)
-    return value
+        raise _response_invalid()
+    tokens_in = container.get(input_key, 0)
+    tokens_out = container.get(output_key, 0)
+    valid_in = type(tokens_in) is int and 0 <= tokens_in <= _MAX_USAGE_TOKENS
+    valid_out = type(tokens_out) is int and 0 <= tokens_out <= _MAX_USAGE_TOKENS
+    safe_in = tokens_in if valid_in else 0
+    safe_out = tokens_out if valid_out else 0
+    if not valid_in or not valid_out:
+        raise _response_invalid(safe_in, safe_out)
+    return safe_in, safe_out
 
 
 def parse_office_provider_response(data: object, transport: str) -> OfficeProviderResponse:
@@ -122,8 +128,7 @@ def parse_office_provider_response(data: object, transport: str) -> OfficeProvid
     if type(data) is not dict:
         raise _response_invalid()
     if transport == "http_openai_compat":
-        tokens_in = _usage_value(data.get("usage"), "prompt_tokens")
-        tokens_out = _usage_value(data.get("usage"), "completion_tokens", tokens_in=tokens_in)
+        tokens_in, tokens_out = _usage_pair(data.get("usage"), "prompt_tokens", "completion_tokens")
         choices = data.get("choices")
         if type(choices) is not list or not choices or type(choices[0]) is not dict:
             raise _response_invalid(tokens_in, tokens_out)
@@ -139,8 +144,7 @@ def parse_office_provider_response(data: object, transport: str) -> OfficeProvid
             message["content"], tokens_in, tokens_out, reason == "length",
         )
     if transport == "ollama":
-        tokens_in = _usage_value(data, "prompt_eval_count")
-        tokens_out = _usage_value(data, "eval_count", tokens_in=tokens_in)
+        tokens_in, tokens_out = _usage_pair(data, "prompt_eval_count", "eval_count")
         message = data.get("message")
         reason = data.get("done_reason")
         if type(message) is not dict or type(message.get("content")) is not str or (reason is not None and type(reason) is not str):
@@ -150,8 +154,7 @@ def parse_office_provider_response(data: object, transport: str) -> OfficeProvid
             message["content"], tokens_in, tokens_out, reason == "length",
         )
     if transport == "http_gemini":
-        tokens_in = _usage_value(data.get("usageMetadata"), "promptTokenCount")
-        tokens_out = _usage_value(data.get("usageMetadata"), "candidatesTokenCount", tokens_in=tokens_in)
+        tokens_in, tokens_out = _usage_pair(data.get("usageMetadata"), "promptTokenCount", "candidatesTokenCount")
         candidates = data.get("candidates")
         if type(candidates) is not list or not candidates or type(candidates[0]) is not dict:
             raise _response_invalid(tokens_in, tokens_out)
