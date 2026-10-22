@@ -4896,3 +4896,29 @@ El incremento acumulado desde master es +37. Medido sobre el head reapilado en P
 rc=0.
 
 El CI exacto de `bc024578` midió `1042 passed`, cero skipped, frente al piso anterior de 1040. En la base local reapilada, el comando completo midió 1044; el delta local de pruebas de providers/modelos explica el +2 adicional. Se actualiza el patrón a 1044, pendiente de confirmación CI del SHA final.
+
+## `audit-log-path-sin-default-silencioso/audit_log_entorno`
+
+Patrón: `^4 passed`. Nació en jax#277 (ops/rutas-de-produccion) y se integró con master
+el 2026-10-21, ya en `ci/pisos.json`. Medido el 2026-09-25 en un venv limpio, sin DB: 4 passed.
+Son las pruebas de `las_manos/_server_audit_log_entorno_test.py`: sin `JAX_AUDIT_LOG_PATH`,
+`import server` falla con `EntornoInvalido`, y `config.toml` ya no trae `audit_log`.
+
+## `rutas-de-produccion-fuera-del-checkout-de-trabajo/rutas_de_produccion`
+
+Patrón: `^56 passed, 4 skipped`. Nació en jax#277 y llegó a `ci/pisos.json` el 2026-10-21.
+Cuenta `tests/test_rutas_de_produccion.py` más `tests/test_rutas_de_produccion_verificador.py`.
+Las 4 saltadas solo corren en el host de producción de jax (si existe `/srv/jax-prod/jax`):
+`test_verificar_rutas_de_produccion_da_cero_en_produccion` y las tres que llaman al
+`sudo -n -u jaxsvc` real.
+
+- 2026-09-25: 4 passed, 1 skipped. Medido en hall9000 con `sudo unshare --mount` tapando
+  `/srv/jax-prod`, el mismo método que jax#274.
+- 2026-09-25, rondas 1 a 4 de la auditoría de jax#277: el verificador pasó a Python
+  (`ops/rutas_de_produccion_verificador.py`), con 56 passed y 4 skipped.
+- 2026-10-21: el job estaba rojo en el runner desde la ronda 4 (`a5975508`).
+  `verificar_fase_a` tenía un default que corría `sudo` real para `realpath -m`, y una prueba no
+  lo reemplazaba. Ahora el parámetro es obligatorio (`e49e29b0`) y el número no cambia.
+  Comprobado en hall9000 con un `sudo` que siempre falla al frente del PATH, como en el runner:
+  57 passed y 3 fallidas. Las 3 fallidas son de las que el runner salta; la cuarta saltada falla en
+  esa copia solo porque no es un checkout de git.

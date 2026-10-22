@@ -1014,11 +1014,9 @@ jobs:
       - run: pip install -r requirements.txt pytest
       - run: python -m pytest las_manos/_server_audit_log_entorno_test.py -v
       - name: Piso exacto de tests CORRIDOS
-        # Medido 2026-09-25 (venv limpio, sin DB): 4 passed.
         run: |
           python -m pytest -q las_manos/_server_audit_log_entorno_test.py 2>&1 | tee /tmp/audit_log_entorno
-          grep -qE "^4 passed" /tmp/audit_log_entorno || {
-            echo "PISO ROTO: se esperaban 4 tests CORRIDOS."; exit 1; }
+          python3 .github/ci/piso.py verificar audit-log-path-sin-default-silencioso/audit_log_entorno /tmp/audit_log_entorno || exit $?
 
   # Rutas de produccion de jax (2026-09-25, ops/rutas-de-produccion): las
   # claves de RUTA de /etc/jax/.env (JAX_CONFIG_PATH, JAX_AUDIT_LOG_PATH,
@@ -1032,9 +1030,7 @@ jobs:
   # las excepciones documentadas de JAX_MISSIONS_DIR/JAX_BIN siguen con
   # motivo); correr el guion DE VERDAD contra /etc/jax/.env solo en el host
   # de produccion de jax (skip en cualquier otro lado, este runner incluido).
-  # Job propio, sin DB. Piso medido en hall9000 con `sudo unshare --mount`
-  # tapando /srv/jax-prod (mismo metodo que ops/versionar-drop-ins, PR
-  # jax#274, para reproducir lo que ve este runner): 4 passed, 1 skipped.
+  # Job propio, sin DB. Historia del piso: docs/ci/pisos.md.
   rutas-de-produccion-fuera-del-checkout-de-trabajo:
     # Auditoria de escalon 3 (PR jax#277, dos rondas): la logica de
     # Fase A/Fase B/Fase C vive ahora en ops/rutas_de_produccion_verificador.py
@@ -1056,8 +1052,7 @@ jobs:
       - name: Piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q tests/test_rutas_de_produccion.py tests/test_rutas_de_produccion_verificador.py 2>&1 | tee /tmp/rutas_de_produccion
-          grep -qE "^56 passed, 4 skipped" /tmp/rutas_de_produccion || {
-            echo "PISO ROTO: se esperaban 56 tests CORRIDOS (no skipeados) y exactamente 4 skipped (los que sólo corren en el host de producción de jax: test_verificar_rutas_de_produccion_da_cero_en_produccion y tres de jaxsvc_puede_leer/escribir contra el comando real). Si el número de skipped baja, revisar antes de asumir que el piso subió -- este runner podría tener /srv/jax-prod/jax."; exit 1; }
+          python3 .github/ci/piso.py verificar rutas-de-produccion-fuera-del-checkout-de-trabajo/rutas_de_produccion /tmp/rutas_de_produccion || exit $?
 
   # Sello de invalidacion cross-proceso del cache de facet_resolver (Q3,
   # 2026-09-01). El job de al lado (facet-resolver-sync) verifica que los dos

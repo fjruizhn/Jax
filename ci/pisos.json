@@ -212,6 +212,14 @@
     "identity-foundation-shadow/policy": {
       "patron": "^1045 passed in ",
       "mensaje": "PISO ROTO: se esperaban exactamente 1045 tests CORRIDOS y 0 skipped de Identity Foundation Shadow, medidos localmente sobre #388 reapilado el 2026-10-10; CI exacta debe confirmar este conteo."
+    },
+    "audit-log-path-sin-default-silencioso/audit_log_entorno": {
+      "patron": "^4 passed",
+      "mensaje": "PISO ROTO: se esperaban 4 tests CORRIDOS."
+    },
+    "rutas-de-produccion-fuera-del-checkout-de-trabajo/rutas_de_produccion": {
+      "patron": "^56 passed, 4 skipped",
+      "mensaje": "PISO ROTO: se esperaban 56 tests CORRIDOS (no skipeados) y exactamente 4 skipped (los que sólo corren en el host de producción de jax: test_verificar_rutas_de_produccion_da_cero_en_produccion y tres de jaxsvc_puede_leer/escribir contra el comando real). Si el número de skipped baja, revisar antes de asumir que el piso subió -- este runner podría tener /srv/jax-prod/jax."
     }
   },
   "minimos": {
