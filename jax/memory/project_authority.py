@@ -94,7 +94,7 @@ _logger = logging.getLogger(__name__)
 
 #: Compatibility marker for JXP's reviewed CLASSIC/Office resolver,
 #: transactional creation, and legacy LAS MANOS isolation contract.
-OFFICE_NAMESPACE_CONTRACT_VERSION = "office-namespace.2"
+OFFICE_NAMESPACE_CONTRACT_VERSION = "office-namespace.3"
 
 
 # --------------------------------------------------------------------------
@@ -1068,8 +1068,7 @@ class ProjectAuthorityAdmin:
         target_tenant_id = self._require_positive_id(target_tenant_id, "target_tenant_id")
         project_id = self._require_positive_id(project_id, "project_id")
         target_user_id = self._require_positive_id(target_user_id, "target_user_id")
-        if actor_user_id == target_user_id:
-            raise AuthorizationDenied("Office membership administration requires a different actor and target")
+        self_grant = actor_user_id == target_user_id
         if operation is NamespaceMembershipOperation.GRANT_OFFICE_MEMBER:
             if not isinstance(member_kind, NamespacedMemberKind):
                 raise AuthorizationDenied("grant requires a namespaced member kind")
@@ -1082,6 +1081,12 @@ class ProjectAuthorityAdmin:
             raise AuthorizationDenied("namespaced membership requires a trusted transaction authorizer")
         idempotency_key = self._canonical_membership_uuid(idempotency_key, "idempotency_key")
         execution = self._validate_membership_execution(execution)
+        if self_grant and not (
+            operation is NamespaceMembershipOperation.GRANT_OFFICE_MEMBER
+            and member_kind is NamespacedMemberKind.INTERNAL
+            and execution.kind is NamespaceMembershipExecutionKind.INTERACTIVE_USER
+        ):
+            raise AuthorizationDenied("Office membership administration requires a different actor and target")
         digest = self._namespace_membership_digest(
             actor_user_id=actor_user_id, target_tenant_id=target_tenant_id, project_id=project_id,
             target_user_id=target_user_id, operation=operation, member_kind=member_kind, execution=execution)
@@ -1129,6 +1134,24 @@ class ProjectAuthorityAdmin:
                                     if member_kind is NamespacedMemberKind.INTERNAL else {"EXTERNAL_CLIENT"})
                 if account_class not in expected_classes:
                     raise TargetUserNotEligible("member kind does not match the target account class")
+            if self_grant:
+                # A creator may join exactly the Office project they created,
+                # once, under the same idempotency key.  This is intentionally
+                # after canonical tenant/user/scope locks and before JXP
+                # authorization or membership replay, so it cannot become a
+                # general self-grant or an authority bypass.
+                await cur.execute(
+                    "SELECT actor_user_id,target_tenant_id,project_id "
+                    "FROM jax_namespace_project_creation_request "
+                    "WHERE namespace=%s AND idempotency_key=%s FOR UPDATE",
+                    (namespace.value, idempotency_key))
+                creation = await cur.fetchone()
+                if (not creation
+                        or int(self._value(creation, "actor_user_id", 0)) != actor_user_id
+                        or int(self._value(creation, "target_tenant_id", 1)) != target_tenant_id
+                        or int(self._value(creation, "project_id", 2)) != project_id):
+                    raise AuthorizationDenied(
+                        "Office self-grant requires the original project creation request")
             await authorizer.authorize_membership_in_transaction(
                 cur, actor_user_id=actor_user_id, target_tenant_id=target_tenant_id,
                 project_id=project_id, target_user_id=target_user_id, namespace=namespace,

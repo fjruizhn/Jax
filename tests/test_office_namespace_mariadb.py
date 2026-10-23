@@ -15,7 +15,9 @@ import pytest
 
 from base_de_test import es_base_de_test
 from jax.core.db_connect_config import db_connect_timeout_seconds
-from jax.memory.project_authority import (IdempotencyKeyConflict,
+from jax.memory.project_authority import (AuthorizationDenied,
+                                          IdempotencyKeyConflict,
+                                          NamespacedMemberKind,
                                           ProjectAuthorityAdmin,
                                           ProjectAuthorityError,
                                           ProjectNotVisible)
@@ -63,6 +65,17 @@ class _Authorizer:
         self.cursors.append((cursor, kwargs))
         if not self.allow:
             raise PermissionError("revoked")
+
+
+class _MembershipAuthorizer:
+    def __init__(self, *, allow=True):
+        self.allow = allow
+        self.calls = []
+
+    async def authorize_membership_in_transaction(self, cursor, **kwargs):
+        self.calls.append((cursor, kwargs))
+        if not self.allow:
+            raise AuthorizationDenied("current Office authority was revoked")
 
 
 class _FirstHintBarrier:
@@ -126,7 +139,7 @@ async def _setup(name: str):
     try:
         async with conn.cursor() as cur:
             await cur.execute("CREATE TABLE jax_tenants (tenant_id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100) NOT NULL, plan VARCHAR(20), status VARCHAR(20))")
-            await cur.execute("CREATE TABLE jax_users (user_id INT AUTO_INCREMENT PRIMARY KEY, tenant_id INT NOT NULL, email VARCHAR(320) UNIQUE NOT NULL, password_hash VARCHAR(255) NOT NULL, role VARCHAR(20), status VARCHAR(20))")
+            await cur.execute("CREATE TABLE jax_users (user_id INT AUTO_INCREMENT PRIMARY KEY, tenant_id INT NOT NULL, email VARCHAR(320) UNIQUE NOT NULL, password_hash VARCHAR(255) NOT NULL, role VARCHAR(20), status VARCHAR(20), account_class VARCHAR(32) NULL)")
             await cur.execute(_projects_ddl())
             await apply_project_authority_migration(cur)
             await apply_project_authority_migration(cur)
@@ -203,6 +216,91 @@ async def test_office_namespace_migration_creation_replay_rollback_and_index():
                 await cur.execute("EXPLAIN SELECT project_id FROM jax_project_scope WHERE authorization_namespace='CLASSIC' AND tenant_id=%s AND status='ACTIVE' ORDER BY project_id", (tenant_id,))
                 plan = await cur.fetchone()
                 assert plan["key"] == "idx_jax_project_scope_namespace_tenant_status_project"
+    finally:
+        pool.close(); await pool.wait_closed()
+        await _drop(name)
+
+
+@requires_test_db
+@_async
+async def test_office_creator_self_grant_real_db_replays_reauthorizes_and_serializes():
+    """A creator can join only the Office project bound to the creation key.
+
+    This exercises the two durable ledgers on a throw-away schema: creation,
+    self-grant and replay use one UUID, authority remains live on replay, and
+    two concurrent callers leave exactly one membership event/request.
+    """
+    name = f"{_DB}_office_creator_{uuid.uuid4().hex[:10]}"
+    assert es_base_de_test(name)
+    tenant_id, actor_id = await _setup(name)
+    pool = await aiomysql.create_pool(db=name, autocommit=True, minsize=1, maxsize=4,
+                                      cursorclass=aiomysql.DictCursor,
+                                      connect_timeout=db_connect_timeout_seconds(), **_params())
+    try:
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("UPDATE jax_users SET account_class='OFFICE_INTERNAL' WHERE user_id=%s", (actor_id,))
+
+        creator = _Authorizer()
+        api = ProjectAuthorityAdmin(MariaDBB9Store(pool))
+        key = str(uuid.uuid4())
+        project = await api.create_namespaced_project(
+            actor_user_id=actor_id, target_tenant_id=tenant_id,
+            namespace=ProjectNamespace.OFFICE_CONFIDENTIAL, name="Creator", description=None,
+            idempotency_key=key, authorizer=creator)
+        authority = _MembershipAuthorizer()
+
+        async def grant(project_id, request_key, authorizer):
+            async with pool.acquire() as conn:
+                await conn.begin()
+                try:
+                    async with conn.cursor() as cur:
+                        value = await ProjectAuthorityAdmin(object()).grant_namespaced_member_in_transaction(
+                            cur, actor_user_id=actor_id, target_tenant_id=tenant_id, project_id=project_id,
+                            target_user_id=actor_id, namespace=ProjectNamespace.OFFICE_CONFIDENTIAL,
+                            member_kind=NamespacedMemberKind.INTERNAL, idempotency_key=request_key,
+                            authorizer=authorizer)
+                    await conn.commit()
+                    return value
+                except BaseException:
+                    await conn.rollback()
+                    raise
+
+        granted = await grant(project.project_id, key, authority)
+        replay = await grant(project.project_id, key, authority)
+        assert granted.changed and not granted.replayed
+        assert replay.replayed and replay.membership_id == granted.membership_id
+        assert len(authority.calls) == 2
+
+        denied = _MembershipAuthorizer(allow=False)
+        with pytest.raises(AuthorizationDenied, match="authority was revoked"):
+            await grant(project.project_id, key, denied)
+        assert len(denied.calls) == 1
+
+        race_key = str(uuid.uuid4())
+        race_project = await api.create_namespaced_project(
+            actor_user_id=actor_id, target_tenant_id=tenant_id,
+            namespace=ProjectNamespace.OFFICE_CONFIDENTIAL, name="Creator race", description=None,
+            idempotency_key=race_key, authorizer=creator)
+        raced = await asyncio.wait_for(asyncio.gather(
+            grant(race_project.project_id, race_key, _MembershipAuthorizer()),
+            grant(race_project.project_id, race_key, _MembershipAuthorizer()),
+        ), timeout=10)
+        assert {result.replayed for result in raced} == {False, True}
+
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT e.actor_principal,e.actor_type,r.execution_kind,r.project_role "
+                    "FROM jax_project_membership_event e JOIN jax_namespace_membership_mutation_request r "
+                    "ON r.event_id=e.event_id WHERE r.namespace='OFFICE_CONFIDENTIAL' AND r.idempotency_key=%s",
+                    (key,))
+                assert await cur.fetchall() == [{"actor_principal": f"user:{actor_id}", "actor_type": "USER",
+                                                 "execution_kind": "INTERACTIVE_USER", "project_role": "CONTRIBUTOR"}]
+                await cur.execute(
+                    "SELECT COUNT(*) AS n FROM jax_namespace_membership_mutation_request "
+                    "WHERE namespace='OFFICE_CONFIDENTIAL' AND idempotency_key=%s", (race_key,))
+                assert (await cur.fetchone())["n"] == 1
     finally:
         pool.close(); await pool.wait_closed()
         await _drop(name)

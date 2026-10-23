@@ -155,15 +155,17 @@ class Application1020Store:
 
 def test_office_namespace_contract_marker_identifies_the_reviewed_resolver_contract():
     """Catches JXP enabling Office features against a different resolver contract."""
-    assert OFFICE_NAMESPACE_CONTRACT_VERSION == "office-namespace.2"
+    assert OFFICE_NAMESPACE_CONTRACT_VERSION == "office-namespace.3"
 
 
 class MembershipAuthorizer:
     def __init__(self):
         self.calls = []
+        self.statement_counts = []
 
     async def authorize_membership_in_transaction(self, cursor, **kwargs):
         self.calls.append((cursor, kwargs))
+        self.statement_counts.append(len(cursor.calls))
 
 
 @pytest.mark.asyncio
@@ -342,6 +344,129 @@ async def test_office_membership_uses_the_callers_cursor_and_records_a_typed_gra
     assert any("grant_origin='OFFICE'" in sql or "'OFFICE'" in sql for sql, _ in cursor.calls)
     assert not any("BEGIN" in sql.upper() or "COMMIT" in sql.upper() or "ROLLBACK" in sql.upper()
                    for sql, _ in cursor.calls)
+
+
+@pytest.mark.asyncio
+async def test_office_creator_can_grant_themselves_internal_membership_with_creation_key():
+    key = str(uuid.uuid4())
+    cursor = Cursor([
+        {"tenant_id": 4, "status": "ACTIVE"},
+        {"tenant_id": 4, "status": "ACTIVE", "account_class": "OFFICE_INTERNAL"},
+        {"tenant_id": 4, "status": "ACTIVE", "account_class": "OFFICE_INTERNAL"},
+        {"tenant_id": 4, "status": "ACTIVE", "authorization_namespace": "OFFICE_CONFIDENTIAL"},
+        {"actor_user_id": 8, "target_tenant_id": 4, "project_id": 17},
+        None, None,
+    ])
+    authorizer = MembershipAuthorizer()
+
+    result = await ProjectAuthorityAdmin(object()).grant_namespaced_member_in_transaction(
+        cursor, actor_user_id=8, target_tenant_id=4, project_id=17, target_user_id=8,
+        namespace=ProjectNamespace.OFFICE_CONFIDENTIAL, member_kind=NamespacedMemberKind.INTERNAL,
+        idempotency_key=key, authorizer=authorizer)
+
+    assert result.changed and not result.replayed
+    creation_index = next(i for i, (sql, _) in enumerate(cursor.calls)
+                          if "jax_namespace_project_creation_request" in sql)
+    authorize_index = next(i for i, (sql, _) in enumerate(cursor.calls)
+                           if sql.startswith("SELECT operation,actor_user_id"))
+    creation_sql, creation_args = cursor.calls[creation_index]
+    assert "FOR UPDATE" in creation_sql and creation_args == ("OFFICE_CONFIDENTIAL", key)
+    assert creation_index < authorize_index
+    assert len(authorizer.calls) == 1
+    assert authorizer.statement_counts == [5]
+    event_args = next(args for sql, args in cursor.calls if "INSERT INTO jax_project_membership_event" in sql)
+    assert event_args[2:4] == ("user:8", "USER")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("creation", [
+    None,
+    {"actor_user_id": 9, "target_tenant_id": 4, "project_id": 17},
+    {"actor_user_id": 8, "target_tenant_id": 4, "project_id": 18},
+])
+async def test_office_creator_self_grant_requires_exact_creation_record(creation):
+    key = str(uuid.uuid4())
+    cursor = Cursor([
+        {"tenant_id": 4, "status": "ACTIVE"},
+        {"tenant_id": 4, "status": "ACTIVE", "account_class": "OFFICE_INTERNAL"},
+        {"tenant_id": 4, "status": "ACTIVE", "account_class": "OFFICE_INTERNAL"},
+        {"tenant_id": 4, "status": "ACTIVE", "authorization_namespace": "OFFICE_CONFIDENTIAL"},
+        creation,
+    ])
+    authorizer = MembershipAuthorizer()
+
+    with pytest.raises(AuthorizationDenied, match="self-grant requires the original"):
+        await ProjectAuthorityAdmin(object()).grant_namespaced_member_in_transaction(
+            cursor, actor_user_id=8, target_tenant_id=4, project_id=17, target_user_id=8,
+            namespace=ProjectNamespace.OFFICE_CONFIDENTIAL, member_kind=NamespacedMemberKind.INTERNAL,
+            idempotency_key=key, authorizer=authorizer)
+
+    assert not authorizer.calls
+    assert not any("jax_namespace_membership_mutation_request" in sql for sql, _ in cursor.calls)
+
+
+@pytest.mark.asyncio
+async def test_office_creator_self_grant_rejects_cross_tenant_target_before_creation_lookup():
+    cursor = Cursor([
+        {"tenant_id": 4, "status": "ACTIVE"},
+        {"tenant_id": 4, "status": "ACTIVE", "account_class": "OFFICE_INTERNAL"},
+        None,
+    ])
+    with pytest.raises(Exception, match="target user does not belong"):
+        await ProjectAuthorityAdmin(object()).grant_namespaced_member_in_transaction(
+            cursor, actor_user_id=8, target_tenant_id=4, project_id=17, target_user_id=8,
+            namespace=ProjectNamespace.OFFICE_CONFIDENTIAL, member_kind=NamespacedMemberKind.INTERNAL,
+            idempotency_key=str(uuid.uuid4()), authorizer=MembershipAuthorizer())
+    assert not any("jax_namespace_project_creation_request" in sql for sql, _ in cursor.calls)
+
+
+@pytest.mark.asyncio
+async def test_office_creator_self_grant_rejects_a_different_creation_key():
+    creation_key, membership_key = str(uuid.uuid4()), str(uuid.uuid4())
+    cursor = Cursor([
+        {"tenant_id": 4, "status": "ACTIVE"},
+        {"tenant_id": 4, "status": "ACTIVE", "account_class": "OFFICE_INTERNAL"},
+        {"tenant_id": 4, "status": "ACTIVE", "account_class": "OFFICE_INTERNAL"},
+        {"tenant_id": 4, "status": "ACTIVE", "authorization_namespace": "OFFICE_CONFIDENTIAL"},
+        # A real FOR UPDATE lookup cannot return the creation row for this
+        # different key, so its result is absent.
+        None,
+    ])
+    with pytest.raises(AuthorizationDenied, match="self-grant requires the original"):
+        await ProjectAuthorityAdmin(object()).grant_namespaced_member_in_transaction(
+            cursor, actor_user_id=8, target_tenant_id=4, project_id=17, target_user_id=8,
+            namespace=ProjectNamespace.OFFICE_CONFIDENTIAL, member_kind=NamespacedMemberKind.INTERNAL,
+            idempotency_key=membership_key, authorizer=MembershipAuthorizer())
+    lookup = next(args for sql, args in cursor.calls if "jax_namespace_project_creation_request" in sql)
+    assert lookup == ("OFFICE_CONFIDENTIAL", membership_key)
+    assert lookup != ("OFFICE_CONFIDENTIAL", creation_key)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("member_kind,execution", [
+    (NamespacedMemberKind.EXTERNAL_CLIENT, NamespaceMembershipExecution(NamespaceMembershipExecutionKind.INTERACTIVE_USER)),
+    (NamespacedMemberKind.INTERNAL, NamespaceMembershipExecution(
+        NamespaceMembershipExecutionKind.INVITATION_ACCEPTANCE, str(uuid.uuid4()))),
+])
+async def test_office_creator_self_grant_keeps_other_grant_forms_denied(member_kind, execution):
+    cursor = Cursor([])
+    with pytest.raises(AuthorizationDenied, match="different actor and target"):
+        await ProjectAuthorityAdmin(object()).grant_namespaced_member_in_transaction(
+            cursor, actor_user_id=8, target_tenant_id=4, project_id=17, target_user_id=8,
+            namespace=ProjectNamespace.OFFICE_CONFIDENTIAL, member_kind=member_kind,
+            idempotency_key=str(uuid.uuid4()), authorizer=MembershipAuthorizer(), execution=execution)
+    assert not cursor.calls
+
+
+@pytest.mark.asyncio
+async def test_office_creator_cannot_revoke_their_own_membership():
+    cursor = Cursor([])
+    with pytest.raises(AuthorizationDenied, match="different actor and target"):
+        await ProjectAuthorityAdmin(object()).revoke_namespaced_member_in_transaction(
+            cursor, actor_user_id=8, target_tenant_id=4, project_id=17, target_user_id=8,
+            namespace=ProjectNamespace.OFFICE_CONFIDENTIAL, idempotency_key=str(uuid.uuid4()),
+            authorizer=MembershipAuthorizer())
+    assert not cursor.calls
 
 
 @pytest.mark.asyncio

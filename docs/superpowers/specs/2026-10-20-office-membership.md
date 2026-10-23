@@ -16,7 +16,7 @@ Tipos/IDs estrictos, no bool/intcoercion; idempotency_key UUID canónico. Result
 
 ## Política de grant y revoke
 
-Actor canónico activo, clase staffINTERNAL/OFFICE_INTERNAL, perfilOffice y autoridadactual losverificaadaptadorJXP en mismo cursor; corecompruebaidentidadescanónicas y alcance, sin importar módulosJXP/perfiles. Actoresnohumanos/clientesdesconocidosdeniegan. Actor!=target en este contrato de administración de invitaciones; salida voluntaria futura es otraoperación.
+Actor canónico activo, clase staffINTERNAL/OFFICE_INTERNAL, perfilOffice y autoridadactual losverificaadaptadorJXP en mismo cursor; corecompruebaidentidadescanónicas y alcance, sin importar módulosJXP/perfiles. Actoresnohumanos/clientesdesconocidosdeniegan. Actor!=target salvo el único post-create: actor==target admite GRANT_OFFICE_MEMBER INTERNAL con ejecuciónINTERACTIVE_USER sin invitation_id cuando, después de locks tenant→actor/target→scopeOfficeACTIVE y antesdeautorizar/replay, una fila FORUPDATE en jax_namespace_project_creation_request coincideexactamente en namespaceOFFICE_CONFIDENTIAL, mismaidempotency_key, actor,tenantobjetivo yproject. Esa UUID liga ambos ledgers y el evento sigue siendo user:{creator}/USER; revoke, ejecucióncapability, claseexterna, creaciónausente o cualquiermismatch niegan.
 
 Grant exige tenantobjetivoactivo, scopeOfficeACTIVE y targetactivo deexactotenant. TargetclaseINTERNAL/OFFICE_INTERNAL + member_kindINTERNAL fijaCONTRIBUTOR; EXTERNAL_CLIENT +EXTERNAL_CLIENT fijaVIEWER. Ningunaotra combinación. No crea OWNER/REVIEWER/adminheredado ni altera rolglobalclásico. PROJECT_ADMIN vive solo engrantOffice, su membershipcanónica sigueCONTRIBUTOR. grant_originOFFICE y campospre_adminNULL; extenderCHECKsinreescribirfilasantiguas.
 
@@ -36,7 +36,7 @@ Evento canónico jax_project_membership_event: operaciónGRANT_OFFICE_MEMBER/REV
 
 ## Versión y migración
 
-OFFICE_NAMESPACE_CONTRACT_VERSION pasaoffice-namespace.2. Creaciónrootactual permanece sinowner/membership; postinitgrupoCLIENTidempotentefailclosed. JXP checkeaversiónexacta antesdeexponeraceptación. Migración idempotente, upgradeclassicpoblado conserva datos. Rollback rechaza si quedan scopesOffice orequestsOffice antesdecualquierDDLdestructivo; revertlimpioeliminanuevatabla/cambiaCHECKypermiteapply→revert→apply.
+OFFICE_NAMESPACE_CONTRACT_VERSION pasaoffice-namespace.3. Creaciónrootactual permanece sinowner/membership; postinitgrupoCLIENTidempotentefailclosed. JXP checkeaversiónexacta antesdeexponeraceptación. Migración idempotente, upgradeclassicpoblado conserva datos. Rollback rechaza si quedan scopesOffice orequestsOffice antesdecualquierDDLdestructivo; revertlimpioeliminanuevatabla/cambiaCHECKypermiteapply→revert→apply.
 
 ## Pruebas
 
