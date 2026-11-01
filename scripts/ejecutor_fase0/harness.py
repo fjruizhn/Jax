@@ -11,7 +11,7 @@ from __future__ import annotations
 import pathlib
 import shlex
 
-NODE_BIN = "/opt/ejecutor/node-v24.16.0/bin"
+NODE_BIN = "/opt/ejecutor/node-v24.22.1/bin"
 CLAUDE = f"{NODE_BIN}/claude"
 CONTROLADOR = [
     "ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
