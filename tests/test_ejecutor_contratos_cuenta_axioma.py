@@ -17,7 +17,7 @@ from jax.ejecutor.contratos import cuenta_axioma as CA
 ENV = {
     "JAX_EJECUTOR_CUENTA": "axioma", "JAX_EJECUTOR_SSH_PUERTO": "58291",
     "JAX_EJECUTOR_CONTROLADOR_LLAVE": "/home/fruiz/.ssh/id_ejecutor_controlador",
-    "JAX_EJECUTOR_NODE_BIN": "/opt/ejecutor/node-v24.16.0/bin", "JAX_EJECUTOR_LIB": "/opt/ejecutor/lib",
+    "JAX_EJECUTOR_NODE_BIN": "/opt/ejecutor/node-v24.22.1/bin", "JAX_EJECUTOR_LIB": "/opt/ejecutor/lib",
     "JAX_EJECUTOR_POLITICA": "/etc/jax-ejecutor/politica.json", "JAX_EJECUTOR_CUENTA_HOME": "/home/axioma",
 }
 
@@ -25,7 +25,7 @@ ENV = {
 def test_cuenta_desde_el_entorno():
     c = CA.cuenta_desde_entorno(ENV)
     assert c == CA.Cuenta("axioma", 58291, Path("/home/fruiz/.ssh/id_ejecutor_controlador"),
-                          Path("/opt/ejecutor/node-v24.16.0/bin"), Path("/opt/ejecutor/lib"),
+                          Path("/opt/ejecutor/node-v24.22.1/bin"), Path("/opt/ejecutor/lib"),
                           Path("/etc/jax-ejecutor/politica.json"), Path("/home/axioma"))
 
 
@@ -60,7 +60,7 @@ def test_remoto_claude_va_en_la_jaula_y_sin_la_llave_en_argv():
     assert ["--ro-bind", "/opt/ejecutor/lib/managed-settings.json", "/etc/claude-code/managed-settings.json"] in \
         [jaula[k:k + 3] for k in range(len(jaula))]
     assert "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1" in palabras
-    assert palabras[palabras.index("--", i) + 1] == "/opt/ejecutor/node-v24.16.0/bin/claude"
+    assert palabras[palabras.index("--", i) + 1] == "/opt/ejecutor/node-v24.22.1/bin/claude"
     assert "hola 'mundo'" in palabras
 
 
