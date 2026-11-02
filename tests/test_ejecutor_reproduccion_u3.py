@@ -19,7 +19,7 @@ import sys
 
 import pytest
 
-CORPUS = pathlib.Path(os.path.expanduser("~/ejecutor-fase0/resultados"))
+CORPUS = pathlib.Path(os.path.expanduser("~/axioma/ejecutor/ejecutor-fase0/resultados"))
 pytestmark = pytest.mark.skipif(
     not (CORPUS / "calificacion_tres_capas.json").exists()
     or not (CORPUS / "examen" / "qwen").is_dir(),

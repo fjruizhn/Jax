@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fase 0 · U2: tokens de arranque del arnés, por configuración de plugins.
 
-Uso: python3 scripts/ejecutor_fase0/arranque.py --salida ~/ejecutor-fase0/resultados [--modelo M]
+Uso: python3 scripts/ejecutor_fase0/arranque.py --salida ~/axioma/ejecutor/ejecutor-fase0/resultados [--modelo M]
 Corre como axioma (harness.py). Configs: A sin plugins; B +superpowers;
 C +superpowers, frontend-design, ui-ux-pro-max, impeccable.
 Dos métodos para el número (lección 15): usage.input_tokens del turno

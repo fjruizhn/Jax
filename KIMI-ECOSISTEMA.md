@@ -26,8 +26,8 @@ funcione contigo y que sea automático». Si los hechos de aquí cambian, actual
 
 5. **Retomar, no empezar de cero.** Si esta sesión viene de un corte (ventana de uso
    agotada, `/clear`, máquina reiniciada): antes de cualquier otra cosa, leer el
-   `TRASPASO.md` de la rama en curso y `~/business-in-a-box/tablero/DECISIONES.md`, y los
-   planes y revisiones vigentes en `~/business-in-a-box/` (`plan-*`, `revision-*`).
+   `TRASPASO.md` de la rama en curso y `~/binb/codigo/business-in-a-box/tablero/DECISIONES.md`, y los
+   planes y revisiones vigentes en `~/binb/codigo/business-in-a-box/` (`plan-*`, `revision-*`).
    Abrir Kimi con `kimi-auto -c` (continúa la sesión de la carpeta) siempre que se pueda.
 
 ## Traspaso continuo — el trabajo vive fuera de la sesión (OBLIGATORIO)
