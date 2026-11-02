@@ -3,7 +3,7 @@
 
 Uso:
   python3 scripts/ejecutor_fase0/contexto.py --modelo qwen3.6:35b-a3b-q4_K_M \
-      --ctx 32768 65536 131072 --salida ~/ejecutor-fase0/resultados
+      --ctx 32768 65536 131072 --salida ~/axioma/ejecutor/ejecutor-fase0/resultados
 
 Corta jax_local mientras corre (gate G1). Al final RESTAURA producción y lo
 verifica: 32768 (lo decide Ollama por VRAM: OLLAMA_CONTEXT_LENGTH=0) y

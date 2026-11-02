@@ -620,7 +620,7 @@ def reproducir(corpus: pathlib.Path) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--corpus", type=pathlib.Path,
-                    default=pathlib.Path("~/ejecutor-fase0/resultados").expanduser())
+                    default=pathlib.Path("~/axioma/ejecutor/ejecutor-fase0/resultados").expanduser())
     a = ap.parse_args()
     if not a.corpus.exists():
         print(f"corpus no encontrado: {a.corpus}", file=sys.stderr)
