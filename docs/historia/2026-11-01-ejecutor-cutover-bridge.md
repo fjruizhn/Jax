@@ -48,4 +48,4 @@ Prueba: `mision_de_humo.py atemai` como `jaxsvc` dio `humo_ok=true` (3 entregada
 
 ## Kill switch falso en la plataforma (mismo día)
 
-Desde el 22-oct `jaxweb` no podía mirar `/etc/jax/interruptor/`, y `pausa_presente` trata «no se puede mirar» como freno puesto: Axioma mostraba kill switch sin que hubiera ninguno, y las sondas salían «saltada: el freno esta puesto». Arreglo: `setfacl -m u:jaxweb:rwx` y `setfacl -d -m u:jaxweb:rw` sobre ese directorio. Cualquier restauración de `/etc/jax` debe conservarlo.
+Desde el 22-oct `jaxweb` no podía mirar `/etc/jax/interruptor/`, y `pausa_presente` trata «no se puede mirar» como freno puesto: Axioma mostraba kill switch sin que hubiera ninguno, y las sondas salían «saltada: el freno esta puesto». Arreglo: `setfacl -m u:jaxweb:rwx` y `setfacl -d -m u:jaxweb:rw` sobre ese directorio. Además `jaxweb` entró a los grupos `jax-carril` y `jax-cli-lock`: sin ellos los modelos locales fallaban con `PermissionError` en `/var/lib/jax-carril/mesa.lock`. Cualquier restauración de `/etc/jax` o reinstalación de la cuenta debe conservar ambos cambios.
