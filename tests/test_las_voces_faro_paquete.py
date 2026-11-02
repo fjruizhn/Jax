@@ -166,9 +166,20 @@ def test_directory_mode_is_0755_even_with_restrictive_umask(monkeypatch, tmp_pat
 
 def test_lock_rejects_concurrent_publisher(monkeypatch, tmp_path):
     subject = modulo()
-    monkeypatch.setattr(subject, "LOCK_FILE", tmp_path / "lock")
+    lock = tmp_path / "lock"
+    monkeypatch.setattr(subject, "LOCK_FILE", lock)
     monkeypatch.setattr(subject, "_crear_directorio_root", lambda _: None)
-    monkeypatch.setattr(subject.os, "fstat", lambda _: SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0, st_gid=0))
+    fstat_real = os.fstat
+
+    def fstat_del_lock_como_root(fd: int):
+        # `subject.os` ES el módulo `os`: este parche alcanza a todo el proceso, pytest incluido.
+        # Solo el lock finge ser root; cualquier otro descriptor recibe su fstat real.
+        real = fstat_real(fd)
+        if lock.exists() and os.path.samestat(real, os.stat(lock)):
+            return SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0, st_gid=0)
+        return real
+
+    monkeypatch.setattr(subject.os, "fstat", fstat_del_lock_como_root)
     with subject._bloqueo_publicacion():
         with pytest.raises(subject.PublicacionRechazada, match="otra publicación"):
             with subject._bloqueo_publicacion():
