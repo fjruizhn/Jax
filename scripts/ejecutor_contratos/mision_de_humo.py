@@ -2,7 +2,7 @@
 # scripts/ejecutor_contratos/mision_de_humo.py
 """Misión de humo REAL del Ejecutor, de SOLO LECTURA, por el camino gobernado completo.
 
-Contra una máquina SIN datos de clientes (la VM desechable `ejecutor-prueba`), nunca contra
+Contra una máquina SIN datos de clientes (`ejecutor-prueba` se retiró el 2026-11-01: hoy no hay ninguna), nunca contra
 un servidor de clientes: el arranque la rechaza (compuerta de C5 y contratos remotos).
 
 1. `exigir_contratos` con las máquinas de la misión (el mismo arranque que el vigía).
@@ -24,7 +24,7 @@ Al final: cadena del registro, pasos de la misión en el registro, pausa ausente
 
 Uso: set -a; . <(sudo -n cat /etc/jax/.env); set +a
      PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.:las_manos .venv/bin/python scripts/ejecutor_contratos/mision_de_humo.py \
-       ejecutor-prueba
+       <máquina sin datos de clientes>
 Salida `clave=valor`; sale 0 sólo con `humo_ok=true`.
 """
 from __future__ import annotations

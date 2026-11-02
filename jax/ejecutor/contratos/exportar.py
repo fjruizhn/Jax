@@ -50,6 +50,7 @@ def documento(hosts, reglas, respaldos, edad_c2, generada_at: str) -> dict:
         raise ExportacionImposible("c2_edad_max_invalida") from None
     if edad <= 0:
         raise ExportacionImposible("c2_edad_max_invalida")
+    activas = {h[0] for h in hosts}
     doc = {
         "version": politica.VERSION,
         "generada_at": generada_at,
@@ -59,7 +60,9 @@ def documento(hosts, reglas, respaldos, edad_c2, generada_at: str) -> dict:
                     "ambito_hosts": [ah] if ah else [], "ambito_roles": _roles(ar), "es_canario": bool(ec),
                     "ejemplos_coincide": json.loads(ej), "ejemplos_no_coincide": json.loads(no)}
                    for i, c, t, h, ca, pa, ah, ar, ec, ej, no in reglas],
-        "respaldos": {n: m.replace(tzinfo=timezone.utc).isoformat() for n, m in respaldos if m is not None},
+        # Sólo máquinas activas: `politica.validar` rechaza el respaldo de una fuera del inventario.
+        "respaldos": {n: m.replace(tzinfo=timezone.utc).isoformat() for n, m in respaldos
+                      if m is not None and n in activas},
         "c2_edad_max_s": edad,
     }
     firmado = politica.firmar(doc)

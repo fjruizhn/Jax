@@ -12,7 +12,7 @@ from jacobs import store
 from jax.ejecutor.contratos import exportar, politica
 
 INVENTARIO = [("hall9000", "192.0.2.5", "hypervisor", 1), ("atemai", "192.0.2.11", "desarrollo", 0),
-              ("prod", "192.0.2.10", "produccion", 0), ("bridge", "192.0.2.20", "clientes", 0)]
+              ("prod", "192.0.2.10", "produccion", 0)]
 
 
 async def _con_inventario(accion):
@@ -40,7 +40,7 @@ async def _con_inventario(accion):
                 for k in range(200):
                     await cur.execute(
                         f"INSERT INTO ejecutor_punto_restauracion ({columnas}) VALUES ({valores})",
-                        (INVENTARIO[k % 4][0], f"prueba-{k}", k) + ((k,) if con_respaldado_at else ()))
+                        (INVENTARIO[k % len(INVENTARIO)][0], f"prueba-{k}", k) + ((k,) if con_respaldado_at else ()))
             await conn.commit()
             return await accion(conn)
     finally:
@@ -49,6 +49,24 @@ async def _con_inventario(accion):
                 await cur.execute("DELETE FROM ejecutor_punto_restauracion WHERE referencia LIKE %s", ("prueba-%",))
                 await cur.execute("DELETE FROM ejecutor_host WHERE ip LIKE %s", ("192.0.2.%",))
             await conn.commit()
+
+
+def test_una_maquina_inactiva_no_exporta_sus_respaldos():
+    async def accion(conn):
+        async with conn.cursor() as cur:
+            await cur.execute("INSERT INTO ejecutor_host (nombre, ip, puerto, rol, activo) "
+                              "VALUES ('retirada', '192.0.2.99', 58291, 'clientes', 0)")
+            await cur.execute("INSERT INTO ejecutor_punto_restauracion (host_nombre, referencia, metodo, "
+                              "restaurado_y_verificado_at, verificado_por, evidencia, respaldado_at) "
+                              "VALUES ('retirada', 'prueba-retirada', 'recreacion', UTC_TIMESTAMP(), 'test', 'test', "
+                              "UTC_TIMESTAMP())")
+        await conn.commit()
+        filas = await exportar.leer(conn)
+        return exportar.documento(*filas, "2026-09-17T12:00:00+00:00")
+
+    doc = asyncio.run(_con_inventario(accion))
+    assert "retirada" not in doc["respaldos"]
+    assert politica.validar(doc).respaldos
 
 
 def test_la_semilla_real_exporta_legible_y_pasa_su_autoprueba():
@@ -64,7 +82,7 @@ def test_la_semilla_real_exporta_legible_y_pasa_su_autoprueba():
 
 # Semilla v1 (14) y reglas contra envoltorios (7, jax-platform `ejecutor_reglas_envoltorios_v1`).
 SEMILLA_V1 = {
-    "canario_c1", "ssh_sin_tt", "apt_full_upgrade_bridge", "migrate_fresh_produccion", "sed_i_env",
+    "canario_c1", "ssh_sin_tt", "apt_full_upgrade_prod", "migrate_fresh_produccion", "sed_i_env",
     "pure_ftpd_parar_atemai", "respaldos_borrar", "ajustes_claude_code", "borrar_archivos",
     "sql_destructivo", "dns_correo", "parar_servicio", "quitar_paquetes", "disco",
 }

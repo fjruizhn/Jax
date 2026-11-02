@@ -4055,6 +4055,8 @@ Sin historia anotada en el workflow.
 
 ## `jacobs-gobernanza-db/out`
 
+219 -> 220 el 2026-11-01: `test_una_maquina_inactiva_no_exporta_sus_respaldos` (retiro de bridge). Medido en el runner.
+
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^170 passed`
 
 Historia (comentarios que estaban sobre el piso en `policy.yml`):
