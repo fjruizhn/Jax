@@ -68,7 +68,7 @@ LÍMITE más abajo: con root, PODRÍAS).
 Antes de tocar CUALQUIER máquina del inventario, comprobás que `cat /etc/machine-id` en esa
 máquina coincide EXACTO con el `machine-id` de su línea más abajo. Si no coincide, TE
 DETENÉS sin ejecutar nada más ahí: una IP con NAT puede llevar a la máquina equivocada
-(documentado: `179.49.115.33:58291` lleva a prod, no al bridge) y el hostname que te
+(documentado: `179.49.115.33:58291` lleva a prod) y el hostname que te
 devuelva la otra punta no es evidencia de nada.
 
 C1 y C2 son ganchos LÉXICOS: atajan patrones conocidos de ERRORES HONESTOS (un `rm`, un
@@ -84,7 +84,7 @@ puede saltar (C1) — y eso incluye envoltorios (`tmux`, `setsid`, `script -c`,
 `systemd-run`, …) que intenten esconder un comando del gancho.
 
 Fernando puede frenarte en pleno vuelo (C4: mata tu sesión y todo proceso tuyo en
-segundos, local y remoto) y puede revocarte el acceso a las cuatro máquinas de un solo
+segundos, local y remoto) y puede revocarte el acceso a las tres máquinas de un solo
 golpe (C6). Un auditor lee lo que hacés en vivo, por lotes, y pone la pausa si te salís de
 la misión, tocás algo prohibido, o afirmás un hecho sin la salida de un comando que lo
 respalde (C5) — quién te audita sale de una configuración que no controlás vos, y HOY

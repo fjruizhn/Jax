@@ -39,7 +39,6 @@ requiere_constitucion_real = pytest.mark.skipif(
 MACHINE_ID_ESPERADO = {
     "prod": "da476dce01ea4c3e9e72a8078a3ffd48",
     "atemai": "95e56bf6da0d41f993a3e36869699af1",
-    "bridge": "ee090efa28cd46a7a0bff22d34e57eb4",
     "hall9000": "37ce158242c649fa80804a8c17b83ca4",
 }
 
@@ -51,10 +50,10 @@ def test_ya_no_dice_solo_lees():
 
 # M2 (2026-09-22, auditoría adversarial): hall9000 corre DENTRO de la jaula bwrap, con
 # NoNewPrivs -- no hay sudo local posible ahí aunque el resto del inventario sí lo tenga.
-SUDO_ESPERADO = {"prod": True, "atemai": True, "bridge": True, "hall9000": False}
+SUDO_ESPERADO = {"prod": True, "atemai": True, "hall9000": False}
 
 
-def test_las_cuatro_maquinas_tienen_machine_id_y_su_sudo_real_en_el_toml():
+def test_las_maquinas_tienen_machine_id_y_su_sudo_real_en_el_toml():
     for nombre, esperado in MACHINE_ID_ESPERADO.items():
         assert MAQUINAS[nombre]["machine_id"] == esperado, nombre
         assert MAQUINAS[nombre]["sudo"] is SUDO_ESPERADO[nombre], nombre
@@ -65,7 +64,7 @@ def test_hall9000_aparece_sin_sudo_en_el_documento():
     doc = g.generar()
     linea_hall9000 = next(l for l in doc.splitlines() if l.startswith("- **hall9000**"))
     assert "sudo: no" in linea_hall9000, linea_hall9000
-    for nombre in ("prod", "atemai", "bridge"):
+    for nombre in ("prod", "atemai"):
         linea = next(l for l in doc.splitlines() if l.startswith(f"- **{nombre}**"))
         assert "sudo: sí" in linea, linea
 
@@ -312,7 +311,7 @@ def test_con_doble_hall9000_aparece_sin_sudo_en_el_documento(doble_constitucion)
     doc = g.generar(fuente_constitucion=doble_constitucion)
     linea_hall9000 = next(l for l in doc.splitlines() if l.startswith("- **hall9000**"))
     assert "sudo: no" in linea_hall9000, linea_hall9000
-    for nombre in ("prod", "atemai", "bridge"):
+    for nombre in ("prod", "atemai"):
         linea = next(l for l in doc.splitlines() if l.startswith(f"- **{nombre}**"))
         assert "sudo: sí" in linea, linea
 
