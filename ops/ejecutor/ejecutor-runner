@@ -1,0 +1,11 @@
+#!/bin/bash
+# Corre como root por sudoers. Sin argumentos: carga el entorno del servicio y arranca el runner como jaxsvc.
+set -u
+R=$(readlink -f /opt/jax-platform-pair/current)/jax
+env -i bash -c '
+set -a; . /etc/jax/runtime.env 2>/dev/null; set +a
+export HOME=/var/lib/jaxsvc PATH=/usr/local/bin:/usr/bin:/bin
+export JAX_REPO_PATH="$1" PYTHONPATH="$1:$1/las_manos" PYTHONDONTWRITEBYTECODE=1
+cd "$1"
+exec setpriv --reuid=jaxsvc --regid=jaxsvc --init-groups /srv/jax-prod/jax/.venv/bin/python -m jax.ejecutor.mision_servicio
+' _ "$R"
