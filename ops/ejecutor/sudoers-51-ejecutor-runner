@@ -1,0 +1,3 @@
+# La plataforma (jaxweb) lanza el runner del Ejecutor. Orden de Fernando, 2026-11-01.
+Defaults!/usr/local/libexec/ejecutor-runner !use_pty, !log_output
+jaxweb ALL=(root) NOPASSWD: /usr/local/libexec/ejecutor-runner ""

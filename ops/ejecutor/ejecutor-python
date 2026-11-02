@@ -1,0 +1,4 @@
+#!/bin/bash
+# La plataforma corre como jaxweb y el Ejecutor como jaxsvc: solo se relanza mision_servicio.
+[ "$1 ${2:-}" = "-m jax.ejecutor.mision_servicio" ] && [ $# -eq 2 ] || { echo "ejecutor-python: orden no permitida" >&2; exit 64; }
+exec sudo -n /usr/local/libexec/ejecutor-runner

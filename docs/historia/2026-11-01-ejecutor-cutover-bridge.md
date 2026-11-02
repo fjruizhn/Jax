@@ -37,3 +37,11 @@ La política conserva 24 reglas con los mismos patrones. Cambian hosts, respaldo
 
 - Par nuevo desde master: traía además 14 merges, casi todos de Oficina, fuera del encargo.
 - Recrear `ejecutor-prueba`: Fernando la dio por retirada.
+
+## Misiones desde la plataforma (mismo día, orden de Fernando)
+
+La plataforma corre como `jaxweb` y el Ejecutor como `jaxsvc`. `JAX_EJECUTOR_PYTHON` en `/etc/jax/runtime.env` apunta ahora a `/usr/local/libexec/ejecutor-python`, que llama por sudo, sin argumentos, a `/usr/local/libexec/ejecutor-runner`. Ese script carga el entorno y arranca solo `mision_servicio` como `jaxsvc`. `jaxweb` no recibe llaves, política ni interruptor.
+
+Copias en `ops/ejecutor/`: `ejecutor-python`, `ejecutor-runner` y `sudoers-51-ejecutor-runner`. Instalar en `/usr/local/libexec/` y `/etc/sudoers.d/51-ejecutor-runner`.
+
+Prueba: `mision_de_humo.py atemai` como `jaxsvc` dio `humo_ok=true` (3 entregadas, 0 descartadas, `cadena_ok=true`). Un primer intento se detuvo porque el auditor local falló el canario limpio `identidad_de_la_maquina_de_la_mision`: C5 puede variar entre corridas.
