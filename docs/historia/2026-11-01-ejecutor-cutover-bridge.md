@@ -45,3 +45,7 @@ La plataforma corre como `jaxweb` y el Ejecutor como `jaxsvc`. `JAX_EJECUTOR_PYT
 Copias en `ops/ejecutor/`: `ejecutor-python`, `ejecutor-runner` y `sudoers-51-ejecutor-runner`. Instalar en `/usr/local/libexec/` y `/etc/sudoers.d/51-ejecutor-runner`.
 
 Prueba: `mision_de_humo.py atemai` como `jaxsvc` dio `humo_ok=true` (3 entregadas, 0 descartadas, `cadena_ok=true`). Un primer intento se detuvo porque el auditor local falló el canario limpio `identidad_de_la_maquina_de_la_mision`: C5 puede variar entre corridas.
+
+## Kill switch falso en la plataforma (mismo día)
+
+Desde el 22-oct `jaxweb` no podía mirar `/etc/jax/interruptor/`, y `pausa_presente` trata «no se puede mirar» como freno puesto: Axioma mostraba kill switch sin que hubiera ninguno, y las sondas salían «saltada: el freno esta puesto». Arreglo: `setfacl -m u:jaxweb:rwx` y `setfacl -d -m u:jaxweb:rw` sobre ese directorio. Cualquier restauración de `/etc/jax` debe conservarlo.
