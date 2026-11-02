@@ -9,6 +9,9 @@ on:
   pull_request:
     branches: ["**"]
 
+env:
+  PIP_CONSTRAINT: ${{ github.workspace }}/ci/constraints-herramientas.txt
+
 jobs:
   canonical-projections:
     runs-on: ubuntu-latest
