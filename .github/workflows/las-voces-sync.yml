@@ -10,7 +10,7 @@ on:
     branches: ["**"]
 
 env:
-  PIP_CONSTRAINT: ${{ github.workspace }}/ci/constraints-herramientas.txt
+  PIP_CONSTRAINT: ${{ github.workspace }}/constraints-ci.txt
 
 jobs:
   canonical-projections:

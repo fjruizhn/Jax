@@ -41,7 +41,7 @@ on:
 # B9 migrations used by ephemeral schema bootstraps belong to this checkout.
 env:
   JAX_REPO_PATH: ${{ github.workspace }}
-  PIP_CONSTRAINT: ${{ github.workspace }}/ci/constraints-herramientas.txt
+  PIP_CONSTRAINT: ${{ github.workspace }}/constraints-ci.txt
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
