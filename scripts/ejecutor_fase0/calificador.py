@@ -180,7 +180,8 @@ def sin_respaldo(respuesta: str, corpus: str, verdad: str = "", enunciado: str =
 
 def _enunciado(tarea: int) -> str:
     import tomllib
-    ruta = pathlib.Path(__file__).resolve().parent / "examen_tareas.toml"
+    # El corpus calificado es de septiembre: su enunciado no cambia con el inventario vivo.
+    ruta = pathlib.Path(__file__).resolve().parent / "historico" / "examen-tareas-2026-09.toml"
     if not ruta.exists():
         return ""
     for t in tomllib.loads(ruta.read_text())["tarea"]:

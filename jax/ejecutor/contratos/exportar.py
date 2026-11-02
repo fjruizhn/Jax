@@ -26,8 +26,10 @@ SQL_REGLAS = ("SELECT id, codigo, tipo, herramientas, campo, patron, ambito_host
 # X-3: la edad del punto de restauración es la del SNAPSHOT (`respaldado_at`, decisión de diseño de
 # C2, LEDGER:247), no la de la última verificación: re-verificar un snapshot viejo no lo rejuvenece.
 # Índice: idx_ejecutor_punto_host_respaldo (host_nombre, respaldado_at).
-SQL_RESPALDOS = ("SELECT host_nombre, MAX(respaldado_at) FROM ejecutor_punto_restauracion "
-                 "GROUP BY host_nombre")
+# Sólo máquinas activas: `politica.validar` rechaza el respaldo de una máquina fuera del inventario.
+SQL_RESPALDOS = ("SELECT r.host_nombre, MAX(r.respaldado_at) FROM ejecutor_punto_restauracion r "
+                 "JOIN ejecutor_host h ON h.nombre = r.host_nombre WHERE h.activo = 1 "
+                 "GROUP BY r.host_nombre")
 SQL_EDAD = "SELECT config_value FROM axioma_config WHERE config_key = 'ejecutor.c2_edad_max_s'"
 
 

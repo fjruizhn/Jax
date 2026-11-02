@@ -51,6 +51,24 @@ async def _con_inventario(accion):
             await conn.commit()
 
 
+def test_una_maquina_inactiva_no_exporta_sus_respaldos():
+    async def accion(conn):
+        async with conn.cursor() as cur:
+            await cur.execute("INSERT INTO ejecutor_host (nombre, ip, puerto, rol, activo) "
+                              "VALUES ('retirada', '192.0.2.99', 58291, 'clientes', 0)")
+            await cur.execute("INSERT INTO ejecutor_punto_restauracion (host_nombre, referencia, metodo, "
+                              "restaurado_y_verificado_at, verificado_por, evidencia, respaldado_at) "
+                              "VALUES ('retirada', 'prueba-retirada', 'recreacion', UTC_TIMESTAMP(), 'test', 'test', "
+                              "UTC_TIMESTAMP())")
+        await conn.commit()
+        filas = await exportar.leer(conn)
+        return exportar.documento(*filas, "2026-09-17T12:00:00+00:00")
+
+    doc = asyncio.run(_con_inventario(accion))
+    assert "retirada" not in doc["respaldos"]
+    assert politica.validar(doc).respaldos
+
+
 def test_la_semilla_real_exporta_legible_y_pasa_su_autoprueba():
     async def accion(conn):
         filas = await exportar.leer(conn)

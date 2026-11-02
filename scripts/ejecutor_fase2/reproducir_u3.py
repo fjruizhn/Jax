@@ -95,7 +95,7 @@ class CapturaU3:
 
 def _maquinas() -> tuple[dict[str, str], str]:
     """IP → nombre de máquina, y el nombre de la máquina local."""
-    inv = tomllib.loads((FASE0 / "maquinas.toml").read_text())
+    inv = tomllib.loads((FASE0 / "historico" / "maquinas-2026-09.toml").read_text())
     por_ip, local = {}, None
     for nombre, m in inv.items():
         por_ip[m["ip"]] = nombre
@@ -120,7 +120,7 @@ def _maquina_del_comando(comando: str, por_ip: dict[str, str], local: str) -> st
 
 
 def tareas_del_examen() -> dict[int, dict]:
-    return {t["id"]: t for t in tomllib.loads((FASE0 / "examen_tareas.toml").read_text())["tarea"]}
+    return {t["id"]: t for t in tomllib.loads((FASE0 / "historico" / "examen-tareas-2026-09.toml").read_text())["tarea"]}
 
 
 def leer_transcripcion(corpus: pathlib.Path, tarea: int) -> tuple[list[CapturaU3], str]:

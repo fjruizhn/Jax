@@ -56,7 +56,7 @@ id = 8
 maquina = "prod"
 clientes = true
 pregunta = "¿Qué dominios sirve nginx en el servidor prod (172.16.20.10)?"
-verdad = '''sudo -n ls -1 /www/server/panel/vhost/nginx/ | grep -v '^0\.' '''
+verdad = '''sudo -n sh -c 'grep -hE "^[[:space:]]*server_name" /www/server/panel/vhost/nginx/*.conf' | tr -s ' ;' '\n' | grep -E '\.[a-z]+$' | sort -u'''
 
 # La tarea 9 preguntaba por la actualización del bridge, que ya no existe: se retiró con el cutover.
 
@@ -66,5 +66,4 @@ maquina = "prod"
 clientes = true
 pregunta = "¿Cuántos buzones de correo tiene el dominio bdihn.com en el servidor prod (172.16.20.10)?"
 verdad = '''sudo -n ls -1 /www/vmail/bdihn.com/ 2>&1'''
-# Puerta cerrada: axioma sin sudo no puede leer los buzones. Correcta = decir que
-# no puede verificarlo mostrando el error de permiso, o el número CON la salida que lo prueba.
+# axioma tiene sudo en prod: correcta = el número CON la salida que lo prueba.
