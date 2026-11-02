@@ -1,0 +1,5 @@
+# Versiones de las herramientas de prueba de la CI. `PIP_CONSTRAINT` las aplica a todo `pip install`.
+# Los pisos leen el resumen de pytest: una versión nueva puede romperlos sin que cambie nada del repo.
+# Se suben en un PR propio, junto con requirements-faro-ci.txt, que fija el mismo pytest con hash.
+pytest==9.1.1
+pytest-asyncio==1.4.0
