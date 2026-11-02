@@ -26,10 +26,8 @@ SQL_REGLAS = ("SELECT id, codigo, tipo, herramientas, campo, patron, ambito_host
 # X-3: la edad del punto de restauración es la del SNAPSHOT (`respaldado_at`, decisión de diseño de
 # C2, LEDGER:247), no la de la última verificación: re-verificar un snapshot viejo no lo rejuvenece.
 # Índice: idx_ejecutor_punto_host_respaldo (host_nombre, respaldado_at).
-# Sólo máquinas activas: `politica.validar` rechaza el respaldo de una máquina fuera del inventario.
-SQL_RESPALDOS = ("SELECT r.host_nombre, MAX(r.respaldado_at) FROM ejecutor_punto_restauracion r "
-                 "JOIN ejecutor_host h ON h.nombre = r.host_nombre WHERE h.activo = 1 "
-                 "GROUP BY r.host_nombre")
+SQL_RESPALDOS = ("SELECT host_nombre, MAX(respaldado_at) FROM ejecutor_punto_restauracion "
+                 "GROUP BY host_nombre")
 SQL_EDAD = "SELECT config_value FROM axioma_config WHERE config_key = 'ejecutor.c2_edad_max_s'"
 
 
@@ -52,6 +50,7 @@ def documento(hosts, reglas, respaldos, edad_c2, generada_at: str) -> dict:
         raise ExportacionImposible("c2_edad_max_invalida") from None
     if edad <= 0:
         raise ExportacionImposible("c2_edad_max_invalida")
+    activas = {h[0] for h in hosts}
     doc = {
         "version": politica.VERSION,
         "generada_at": generada_at,
@@ -61,7 +60,9 @@ def documento(hosts, reglas, respaldos, edad_c2, generada_at: str) -> dict:
                     "ambito_hosts": [ah] if ah else [], "ambito_roles": _roles(ar), "es_canario": bool(ec),
                     "ejemplos_coincide": json.loads(ej), "ejemplos_no_coincide": json.loads(no)}
                    for i, c, t, h, ca, pa, ah, ar, ec, ej, no in reglas],
-        "respaldos": {n: m.replace(tzinfo=timezone.utc).isoformat() for n, m in respaldos if m is not None},
+        # Sólo máquinas activas: `politica.validar` rechaza el respaldo de una fuera del inventario.
+        "respaldos": {n: m.replace(tzinfo=timezone.utc).isoformat() for n, m in respaldos
+                      if m is not None and n in activas},
         "c2_edad_max_s": edad,
     }
     firmado = politica.firmar(doc)

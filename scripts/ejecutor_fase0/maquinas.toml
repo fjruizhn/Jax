@@ -3,7 +3,7 @@
 # "SUDO EN LAS CUATRO"): axioma tiene sudo real en atemai y prod. `machine_id` es
 # el contrato de acceso del spec §3.4: antes de operar sobre una IP con NAT,
 # `cat /etc/machine-id` tiene que coincidir con este valor -- nunca el
-# hostname. Dato conocido: 179.49.115.33:58291 lleva a prod.
+# hostname.
 [hall9000]
 ip = "127.0.0.1"
 puerto = 58291
