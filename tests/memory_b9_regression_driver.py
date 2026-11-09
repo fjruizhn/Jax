@@ -8,7 +8,7 @@ FIXTURES. The database must be fresh and named `jax_memory_test_memb9_<sufijo>`,
 owned by user `jax_test`. `tests/memory_b9_provision.py` builds it, in this order:
 `jax_memory_schema.sql` (without its `CREATE DATABASE jax_memory` / `USE`), the minimal
 `jax_tenants`/`jax_users`, migrations 001->004, migration 005 (Python only, through
-`apply_project_authority_migration`), migrations 006->013, and the rows: `jax_tenants`
+`apply_project_authority_migration`), migrations 006->014, and the rows: `jax_tenants`
 1 and 2; `jax_users` 1 (tenant 1, admin), 2 (tenant 2, admin) and 4 (tenant 1,
 operator), all active. See `docs/runbooks/memoria-b9-reactivacion.md`, step 3.
 

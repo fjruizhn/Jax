@@ -453,10 +453,11 @@ async def test_real_migracion_011_quita_el_filesort_de_las_dos_lecturas_de_mensa
 _RAIZ = __import__("pathlib").Path(__file__).resolve().parents[1]
 
 
-def test_readme_de_migraciones_trae_la_marcha_atras_exacta_de_007_a_013():
+def test_readme_de_migraciones_trae_la_marcha_atras_exacta_de_007_a_014():
     texto = (_RAIZ / "jax/memory/b9_migrations/README.md").read_text(encoding="utf-8")
     assert "Marcha atrás" in texto and "ALGORITHM=COPY" in texto and "lock_wait_timeout" in texto
     pasos = [
+        "ALTER TABLE messages DROP INDEX IF EXISTS ft_messages_content",                                # 014
         "ALTER TABLE messages ADD INDEX IF NOT EXISTS idx_conversation (conversation_id)",              # 013 (antes que 011: la FK lo necesita)
         "ALTER TABLE conversations DROP INDEX IF EXISTS idx_conversations_open",                        # 012
         "ALTER TABLE messages DROP INDEX IF EXISTS idx_messages_conversation_turn",                     # 011
@@ -466,7 +467,7 @@ def test_readme_de_migraciones_trae_la_marcha_atras_exacta_de_007_a_013():
         "DROP TABLE IF EXISTS memory_extraction_job_events",                                            # 007
     ]
     posiciones = [texto.index(p) for p in pasos]
-    assert posiciones == sorted(posiciones), "marcha atras en orden inverso: 013, 012, 011, 010, 009, 008, 007"
+    assert posiciones == sorted(posiciones), "marcha atras en orden inverso: 014, 013, 012, 011, 010, 009, 008, 007"
     assert texto.index("SET SESSION lock_wait_timeout=10;") < texto.index(pasos[0])      # la marcha atras tambien limita la espera
 
 
@@ -537,7 +538,7 @@ _MIG = _RAIZ / "jax/memory/b9_migrations"
 
 
 def _ddl_produccion(tabla: str) -> str:
-    """DDL de `tabla` tal como esta HOY en produccion (antes de 011/012/013): el esquema versionado, con
+    """DDL de `tabla` tal como estaba antes de 011–014: el esquema versionado, con
     los indices de esas migraciones quitados y `idx_conversation` repuesto."""
     texto = (_RAIZ / "jax_memory_schema.sql").read_text(encoding="utf-8")
     ddl = _re.search(r"CREATE TABLE `%s` \(.*?\) ENGINE=InnoDB[^;]*;" % tabla, texto, _re.S).group(0)
@@ -648,8 +649,11 @@ async def test_real_014_agrega_fulltext_idempotente_y_match_usa_el_indice():
             await cur.execute("SHOW INDEX FROM messages")
             assert "ft_messages_content" in {r["Key_name"] for r in await cur.fetchall()}
             await cur.execute(consulta); plan = await cur.fetchone()
+            await cur.execute("SELECT id FROM messages WHERE MATCH(content) AGAINST ('memoria compartida' IN NATURAL LANGUAGE MODE)")
+            encontrados = [fila["id"] for fila in await cur.fetchall()]
         assert plan["key"] == "ft_messages_content", plan
         assert "filesort" not in (plan["Extra"] or "").lower() and "temporary" not in (plan["Extra"] or "").lower(), plan
+        assert encontrados == [1]
     await _con_tablas_reales(escenario)
 
 
@@ -758,8 +762,8 @@ async def test_real_la_marcha_atras_del_readme_restaura_el_estado_de_produccion_
     await _con_tablas_reales(escenario)
 
 
-def test_el_esquema_versionado_ordena_los_indices_como_los_deja_show_create_tras_011_a_013():
-    """check_memory_schema_drift.py compara texto: tras 011-013 los indices agregados van al final de los KEY
+def test_el_esquema_versionado_ordena_los_indices_como_los_deja_show_create_tras_011_a_014():
+    """check_memory_schema_drift.py compara texto: tras 011-014 los indices agregados van al final de los KEY
     (despues de idx_conv_tenant / idx_msg_scope), no donde se declararon a mano."""
     texto = (_RAIZ / "jax_memory_schema.sql").read_text(encoding="utf-8")
     conv = _re.search(r"CREATE TABLE `conversations` \(.*?\) ENGINE", texto, _re.S).group(0)

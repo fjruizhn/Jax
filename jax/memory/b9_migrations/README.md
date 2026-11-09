@@ -51,7 +51,7 @@ en cada corrida). Ver `docs/runbooks/memoria-cola-atascada.md`.
 
 Las cuatro van tambien en `jax_memory_schema.sql`. La prueba aislada
 `test_real_014_agrega_fulltext_idempotente_y_match_usa_el_indice` valida que 014 se aplica dos
-veces y que el `EXPLAIN` usa el índice nuevo.
+veces, que el `EXPLAIN` usa el índice nuevo y que `MATCH(content)` devuelve el mensaje esperado.
 
 **Costo de 011, 012 y 013 (medido):** son `ALGORITHM=COPY, LOCK=SHARED`. `INPLACE`, `NOCOPY` y `LOCK=NONE`
 fallan en estas tablas (la `VECTOR KEY` de `messages` y la FK `ON DELETE CASCADE` lo impiden), asi que MariaDB
