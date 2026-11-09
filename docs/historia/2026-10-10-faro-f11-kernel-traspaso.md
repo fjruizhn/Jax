@@ -1,5 +1,37 @@
 # Traspaso continuo · Faro F1.1 paso 6
 
+## Actualización 2026-10-10 · migración documental de #375 después de #388
+
+- **Linaje verificado:** el trabajo comenzó sobre `master@164b77aa` después del merge de
+  #388. Luego #399 avanzó master a `765406f4475ac5babb8ec6af2e6c92b91aa65344`.
+  La rama local de esta migración se rebasó como hija directa de ese tip; su SHA vigente se
+  resuelve desde GitHub y Git, no desde esta nota. El estado operativo mutable de #398 —head,
+  base, checks y mergeability— debe consultarse en GitHub antes de actuar; CI y auditoría
+  siempre tienen que corresponder al head exacto vigente.
+- **Alcance documental:** GitHub Contents API contra `master@164b77aa` devolvió 404 para
+  los historiales Step 4 y Step 5 y el plan Step 5 de storage. Los dos historiales se
+  copiaron byte por byte desde #375 en `6ae6986af2c7fd68b4392e750d65779e5df20875`. El plan
+  conserva el cuerpo de su contenido fuente; se añadió una cabecera de supersesión y una
+  nota temporal, y se adaptó el título para identificarlo como propuesta histórica. El diff
+  actual contiene esos tres documentos y este traspaso, sin cambios de código.
+- **Procedencia por blob:** Step 4 `2f78c408a73c7f71a6b873809eb7a0c325e87db9`; Step 5
+  `1053cc833168c620867fcab8c519a153584b5582`; plan Step 5 fuente
+  `21abdc1cbf639b0efd2e516232f55a87d7127748`. Los dos blobs históricos coinciden exactamente
+  con sus archivos publicados en #375; el plan conserva su cuerpo bajo las adaptaciones
+  descritas arriba.
+- **Alcance de la comparación de código:** la comparación de #375 contra master muestra que
+  master incorporó rutas relacionadas, incluido el kernel y las migraciones posteriores;
+  eso no demuestra equivalencia semántica completa. Esta tarea conserva los documentos y
+  deja #375 abierto para resolución de su owner/Fernando; no atribuye a GLM una conclusión
+  concluyente de supersesión.
+- **Lectura temporal de los documentos:** el plan Step 5 se escribió sobre una versión
+  anterior de Step 4 que todavía incluía `catalogo` en `RuleDecision`. Las correcciones R3
+  posteriores de Step 4 quitaron ese campo. Ambos documentos registran momentos distintos,
+  y el plan está marcado abajo como histórico/supersedido; ninguno sustituye el contrato
+  implementado después en #388/#399.
+- **Decisión:** Fernando indicó la secuencia `35bb → #388 → migración docs-only`; #388 está
+  integrado. El cierre de #375 queda a su owner o a Fernando.
+
 ## Actualización 2026-10-10 · fallos de la CI exacta de d9d259a1
 
 - Policy `38091992759` falló en `tests-puros`, en la suite MariaDB del ledger de autoridad:
