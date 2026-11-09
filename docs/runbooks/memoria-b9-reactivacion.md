@@ -66,7 +66,7 @@ está simulado. Corre como archivo Python, nunca con pytest, y exige una base **
 - `jax_tenants` y `jax_users` mínimas (con la forma de producción; las crea jax-platform, no este repo, y
   la migración 003 tiene una FK a `jax_users`);
 - migraciones `jax/memory/b9_migrations/` 001 → 004, luego **005**, que solo existe en Python
-  (`apply_project_authority_migration`), luego 006 → 013;
+  (`apply_project_authority_migration`), luego 006 → 014;
 - filas: `jax_tenants` 1 y 2; `jax_users` 1 (tenant 1) y 2 (tenant 2), activos y con rol `admin` (la
   adopción legacy exige un administrador real), y 4 (tenant 1, activo, rol `operator`): el miembro sin
   privilegio al que se le deniega la importación y que no debe ver lo privado del usuario 1.
@@ -87,7 +87,7 @@ Fallos de guarda: `test_database_guard` (usuario o nombre de base equivocados), 
 Medido el 2026-10-05 contra MariaDB 12.3.3 desechable: 19 casos PASS. Complementar con las
 regresiones unitarias y las pruebas SQL de atomicidad.
 
-## 4. Migración de jobs (006 y las que siguen): se aplica una vez, y primero se mira si ya está
+## 4. Migración de jobs y recuperación (006 y las que siguen): se aplica una vez, y primero se mira si ya está
 
 El arranque de los workers no debe ejecutar migraciones ni modificar ownership legacy.
 **006 no es idempotente** (`CREATE TRIGGER` y `ADD CONSTRAINT` sin `IF NOT EXISTS`): repetirla entera
@@ -118,13 +118,20 @@ SELECT TABLE_NAME, INDEX_NAME FROM information_schema.STATISTICS WHERE TABLE_SCH
  ((TABLE_NAME='embedding_generations' AND INDEX_NAME='idx_embedding_generation_revision')
   OR (TABLE_NAME='messages' AND INDEX_NAME='idx_conversation')
   OR (TABLE_NAME='memory_objects' AND INDEX_NAME='uq_memory_legacy_binding')) GROUP BY TABLE_NAME, INDEX_NAME;      -- 0 filas
+-- 014: la señal textual de messages debe ser EXACTAMENTE FULLTEXT sobre content, no basta que exista un índice con ese nombre
+SELECT INDEX_TYPE, GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) AS columnas
+ FROM information_schema.STATISTICS
+ WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='messages' AND INDEX_NAME='ft_messages_content'
+ GROUP BY INDEX_TYPE;                                                                                                 -- una fila: FULLTEXT | content
 ```
 
-Medido el 2026-10-05 sobre producción: **todas** dan lo esperado, es decir, 001-013 ya están aplicadas.
+Medido el 2026-10-05 sobre producción: las comprobaciones que entonces existían dieron lo esperado para
+001-013. **Eso no acredita 014.** Solo se declara completo 001-014 cuando la última consulta devuelve
+exactamente `FULLTEXT | content`; si no devuelve esa fila, 014 sigue pendiente aunque el resto esté sano.
 En ese caso el paso es «verificado, nada que aplicar». Si alguna da otra cosa, se inspeccionan columnas,
 triggers, constraints e índices y se completan **exclusivamente los pasos faltantes**, uno por uno, con la
-ventana y el respaldo del paso 2 (011, 012 y 013 bloquean escrituras 1-3 s: ver
-`jax/memory/b9_migrations/README.md`). Las migraciones 007-013 son repetibles (`IF [NOT] EXISTS`); 006 no.
+ventana y el respaldo del paso 2 (ver el contrato de DDL y rollback en
+`jax/memory/b9_migrations/README.md`). Las migraciones 007-014 son repetibles (`IF [NOT] EXISTS`); 006 no.
 
 ## 5. Plan de adopción legacy: verificar si ya está aplicado y que repetirlo crea 0 eventos
 

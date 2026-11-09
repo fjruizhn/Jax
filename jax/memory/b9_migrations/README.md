@@ -44,8 +44,14 @@ en cada corrida). Ver `docs/runbooks/memoria-cola-atascada.md`.
   para `stale_open_conversations` (EXPLAIN antes/despues en las pruebas).
 - `013_messages_drop_redundant_conversation_index.sql`: quita `idx_conversation` de `messages`, cubierto por el
   de la 011 (tambien para la FK CASCADE). Aplicar DESPUES de 011. Verificado con EXPLAIN sobre la DDL real.
+- `014_messages_fulltext.sql`: indice FULLTEXT `ft_messages_content (content)` para la recuperacion textual de
+  mensajes por axioma-memoria. JAX es dueño de este DDL; axioma-memoria solo hace SELECT. El `EXPLAIN` de
+  `MATCH(content) AGAINST (... IN NATURAL LANGUAGE MODE)` debe usar `ft_messages_content`, sin filesort ni
+  tabla temporal.
 
-Las tres van tambien en `jax_memory_schema.sql`.
+Las cuatro van tambien en `jax_memory_schema.sql`. La prueba aislada
+`test_real_014_agrega_fulltext_idempotente_y_match_usa_el_indice` valida que 014 se aplica dos
+veces, que el `EXPLAIN` usa el índice nuevo y que `MATCH(content)` devuelve el mensaje esperado.
 
 **Costo de 011, 012 y 013 (medido):** son `ALGORITHM=COPY, LOCK=SHARED`. `INPLACE`, `NOCOPY` y `LOCK=NONE`
 fallan en estas tablas (la `VECTOR KEY` de `messages` y la FK `ON DELETE CASCADE` lo impiden), asi que MariaDB
@@ -54,15 +60,17 @@ archivo empieza con `SET SESSION lock_wait_timeout=10;` para no esperar indefini
 metadatos; si se agota (error 1205) el ALTER no cambio nada: **reintentar mas tarde, sin subir el limite**.
 Aplicar en ventana tranquila. Probadas contra tablas creadas con la DDL del esquema versionado (`jax_memory_schema.sql`); verificado ademas por la auditoria con la DDL real de produccion, incluidas las `fk_*_project`. Incluye el camino del 1205.
 
-## Marcha atrás de 007–013 (2026-10-05)
+## Marcha atrás de 007–014 (2026-11-09)
 
-Orden INVERSO: 013, 012, 011, 010, 009, 008, 007. Todo con `IF [NOT] EXISTS`, repetible. Respaldar antes
+Orden INVERSO: 014, 013, 012, 011, 010, 009, 008, 007. Todo con `IF [NOT] EXISTS`, repetible. Respaldar antes
 (Principio VI). **Lo irreversible sin respaldo:** bajar 007 borra la auditoría del re-encolado y bajar
 009 borra los contadores de intentos; exportarlos antes si importan. Los pasos sobre `messages` y
 `conversations` son COPY con bloqueo de escrituras (ver arriba): misma ventana y mismo `lock_wait_timeout`.
 
 ```sql
 SET SESSION lock_wait_timeout=10;
+-- 014: quitar la segunda señal de recuperacion de mensajes (COPY, bloquea escrituras)
+ALTER TABLE messages DROP INDEX IF EXISTS ft_messages_content, ALGORITHM=COPY, LOCK=SHARED;
 -- 013: restaurar idx_conversation ANTES de bajar el índice de la 011 (la FK por conversation_id lo necesita)
 ALTER TABLE messages ADD INDEX IF NOT EXISTS idx_conversation (conversation_id), ALGORITHM=COPY, LOCK=SHARED;
 -- 012

@@ -82,7 +82,7 @@ jobs:
           --health-cmd="healthcheck.sh --connect --innodb_initialized"
           --health-interval=5s --health-timeout=5s --health-retries=20
       # Second, empty container for tests/memory_b9_regression_driver.py. The driver needs a
-      # FRESH provisioned database (real tables, migrations 001-013) and the pytest step
+      # FRESH provisioned database (real tables, migrations 001-014) and the pytest step
       # above leaves real tables behind, so they cannot share a database. jax_test only
       # has grants on its own database here too.
       mariadb-driver:
@@ -162,7 +162,7 @@ jobs:
           PY
       - name: Driver de regresion B9 sobre una base fresca (fixtures + 19 casos)
         # tests/memory_b9_provision.py builds jax_memory_test_memb9_driver (schema +
-        # migrations 001-013 + jax_tenants/jax_users rows) and refuses a non-empty
+        # migrations 001-014 + jax_tenants/jax_users rows) and refuses a non-empty
         # database; the driver then exits non-zero if any case fails, and prints
         # status PASS only with every case green. Local run 2026-10-05: 19 PASS.
         env:
