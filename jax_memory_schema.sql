@@ -86,6 +86,7 @@ CREATE TABLE `messages` (
   KEY `idx_msg_scope` (`project_id`,`user_id`),
   KEY `idx_messages_conversation_turn` (`conversation_id`,`turn_number`,`id`),
   VECTOR KEY `idx_embedding_bge_m3` (`embedding_bge_m3`) `DISTANCE`='cosine' `M`='16',
+  FULLTEXT KEY `ft_messages_content` (`content`),
   CONSTRAINT `messages_ibfk_1` FOREIGN KEY (`conversation_id`) REFERENCES `conversations` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 

@@ -17,7 +17,7 @@ What it builds, in this order (same order the production deploy follows):
    `jax_users`, so they must exist before it.
 3. Migrations 001 -> 004 (`jax/memory/b9_migrations/*.sql`).
 4. Migration 005, which is Python only: `apply_project_authority_migration`.
-5. Migrations 006 -> 013.
+5. Migrations 006 -> 014.
 6. Fixture rows the driver asserts on: `jax_tenants` 1 and 2; `jax_users` user 1
    (tenant 1) and user 2 (tenant 2), both `active` and role `admin` (the legacy
    adoption case needs a real administrator, `memory:admin`); and user 4
@@ -157,7 +157,7 @@ async def provisionar(env):
             await _ejecutar(cur, sentencias_de_esquema(), base)
             await _ejecutar(cur, DDL_JAX_PLATAFORMA, base)
             migraciones = {p.name[:3]: p for p in sorted(MIGRACIONES.glob("[0-9][0-9][0-9]_*.sql"))}
-            if sorted(migraciones) != ["001", "002", "003", "004", "006", "007", "008", "009", "010", "011", "012", "013"]:
+            if sorted(migraciones) != ["001", "002", "003", "004", "006", "007", "008", "009", "010", "011", "012", "013", "014"]:
                 raise RuntimeError("migration_set_changed")  # a new migration must be placed in this order on purpose
             for numero in ("001", "002", "003", "004"):
                 await _ejecutar(cur, dividir_sentencias(migraciones[numero].read_text()), base)
@@ -166,7 +166,7 @@ async def provisionar(env):
         async with conn.cursor() as cur:
             await verificar_base(cur, base)
         async with conn.cursor() as cur:
-            for numero in ("006", "007", "008", "009", "010", "011", "012", "013"):
+            for numero in ("006", "007", "008", "009", "010", "011", "012", "013", "014"):
                 await _ejecutar(cur, dividir_sentencias(migraciones[numero].read_text()), base)
             await _ejecutar(cur, FIXTURES, base)
     finally:

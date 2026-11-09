@@ -11,10 +11,12 @@ Dar a `messages` una señal textual de recuperación para que axioma-memoria pue
 - Arquitecto Sol recomendó índice textual y RRF plano; medición mostró que la búsqueda semántica global no recupera bien fragmentos parciales de mensajes largos.
 - La rama claude-skills paralela es `codex/op225-rrf-shutdown-20261109`; ya contiene apagado acotado y prepara FULLTEXT de hechos. No integrar lector de mensajes antes de instalar este índice.
 - JAX PR #349 de deadlocks en `messages` sigue abierto; comprobar compatibilidad antes de integrar.
+- Migración 014 aditiva/idempotente con `lock_wait_timeout=10`, `ALGORITHM=COPY`, `LOCK=SHARED`; espejo en esquema versionado y provisión de pruebas. Rollback documentado en README. Pruebas focales: 38 passed, 12 skipped; las de MariaDB real se omitieron por falta de base aislada configurada. El test real nuevo ejecuta migración dos veces y EXPLAIN cuando esa base exista.
+- PR #349 no choca semánticamente con FULLTEXT, pero su rama vieja diverge del esquema de `master` y necesita rebase propio antes de integrar; no se modifica ni integra aquí.
 
 ## Falta
 
-- Implementar y probar migración JAX idempotente con `lock_wait_timeout`, costo y rollback explícito; ensayar en base desechable.
+- Ensayar 014 en base desechable con MariaDB real y EXPLAIN antes de cualquier DDL en producción.
 - Auditoría Sol del SHA exacto y CI; PR propio, merge autorizado.
 - Respaldo restaurado, DDL en producción con ventana vigente y EXPLAIN de consulta real; Biblioteca.
 - Solo después, implementar lector SELECT y probar corpus de mensajes en axioma-memoria.

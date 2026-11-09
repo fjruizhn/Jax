@@ -61,9 +61,9 @@ def test_el_orden_de_migraciones_cubre_todo_el_directorio():
     """Una migracion nueva (014...) tiene que colocarse a proposito en el orden de
     `provisionar`; si no, el constructor de fixtures y la produccion divergen en silencio."""
     numeros = sorted(p.name[:3] for p in (_RAIZ / "jax/memory/b9_migrations").glob("[0-9][0-9][0-9]_*.sql"))
-    assert numeros == ["001", "002", "003", "004", "006", "007", "008", "009", "010", "011", "012", "013"]
+    assert numeros == ["001", "002", "003", "004", "006", "007", "008", "009", "010", "011", "012", "013", "014"]
     fuente = (_RAIZ / "tests/memory_b9_provision.py").read_text()
-    assert '["001", "002", "003", "004", "006", "007", "008", "009", "010", "011", "012", "013"]' in fuente
+    assert '["001", "002", "003", "004", "006", "007", "008", "009", "010", "011", "012", "013", "014"]' in fuente
 
 
 # --- Auditoria Jax#355, MINOR 3: la misma guarda de puerto y la base se verifica tras cada migracion ---

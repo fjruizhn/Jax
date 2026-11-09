@@ -1,0 +1,21 @@
+-- Indice textual de messages para axioma-memoria (OP#225, 2026-11-09).
+--
+-- El vector recupera significado; FULLTEXT recupera una frase parcial o una palabra exacta
+-- dentro de mensajes largos. JAX es dueño de `messages`: axioma-memoria solo lo consulta.
+-- La consulta que habilita es:
+--   SELECT id, conversation_id, role, content, created_at
+--   FROM messages
+--   WHERE MATCH(content) AGAINST (? IN NATURAL LANGUAGE MODE)
+--   LIMIT ?
+-- Sin ORDER BY: InnoDB entrega el modo natural por relevancia y ordenar MATCH agrega trabajo.
+--
+-- COSTO: la tabla lleva VECTOR KEY y una FK CASCADE. Se fija ALGORITHM=COPY con LOCK=SHARED,
+-- igual que 011 y 013: durante la copia se bloquean escrituras pero las lecturas siguen.
+-- `test_real_014_agrega_fulltext_idempotente_y_match_usa_el_indice` lo ejecuta sobre una base
+-- desechable con esa DDL; no aplicar hasta que esa prueba verde acompañe el cambio. Aplicar en
+-- ventana tranquila. lock_wait_timeout=10 evita esperar indefinidamente por metadata; un 1205
+-- no cambia nada y se reintenta despues, sin subirlo.
+-- El indice es aditivo e idempotente. Bajada: ALTER TABLE messages DROP INDEX
+-- ft_messages_content, ALGORITHM=COPY, LOCK=SHARED; (mismo respaldo y ventana).
+SET SESSION lock_wait_timeout=10;
+ALTER TABLE messages ADD FULLTEXT KEY IF NOT EXISTS ft_messages_content (content), ALGORITHM=COPY, LOCK=SHARED;

@@ -542,7 +542,8 @@ def _ddl_produccion(tabla: str) -> str:
     texto = (_RAIZ / "jax_memory_schema.sql").read_text(encoding="utf-8")
     ddl = _re.search(r"CREATE TABLE `%s` \(.*?\) ENGINE=InnoDB[^;]*;" % tabla, texto, _re.S).group(0)
     lineas = [l for l in ddl.splitlines()
-              if "idx_messages_conversation_turn" not in l and "idx_conversations_open" not in l and "`idx_conversation`" not in l]
+              if "idx_messages_conversation_turn" not in l and "idx_conversations_open" not in l
+              and "`idx_conversation`" not in l and "ft_messages_content" not in l]
     if tabla == "messages":
         i = next(n for n, l in enumerate(lineas) if "PRIMARY KEY" in l)
         lineas.insert(i + 1, "  KEY `idx_conversation` (`conversation_id`),")
@@ -596,6 +597,19 @@ def test_011_012_013_fijan_lock_wait_timeout_dentro_del_propio_sql_y_documentan_
         assert "ALGORITHM=COPY, LOCK=SHARED" in sentencias[1], nombre                    # explicito, no a criterio del motor
 
 
+def test_014_fija_lock_wait_timeout_y_declara_el_contrato_de_busqueda_y_bajada():
+    nombre = "014_messages_fulltext.sql"
+    crudo = (_MIG / nombre).read_text(encoding="utf-8")
+    sentencias = _sentencias(nombre)
+    assert sentencias == [
+        "SET SESSION lock_wait_timeout=10",
+        "ALTER TABLE messages ADD FULLTEXT KEY IF NOT EXISTS ft_messages_content (content), ALGORITHM=COPY, LOCK=SHARED",
+    ]
+    for frase in ("MATCH(content) AGAINST", "axioma-memoria solo lo consulta", "1205",
+                  "DROP INDEX", "ALGORITHM=COPY", "LOCK=SHARED"):
+        assert frase in crudo, frase
+
+
 @pytest.mark.asyncio
 async def test_real_011_sobre_la_ddl_de_produccion_con_vector_key_y_fk_cascade():
     async def escenario(c1):
@@ -612,6 +626,30 @@ async def test_real_011_sobre_la_ddl_de_produccion_con_vector_key_y_fk_cascade()
             assert "idx_messages_conversation_turn" in {r["Key_name"] for r in await cur.fetchall()}
             await cur.execute("DELETE FROM conversations WHERE id=1")                              # la FK CASCADE sigue viva
             await cur.execute("SELECT COUNT(*) AS n FROM messages"); assert (await cur.fetchone())["n"] == 0
+    await _con_tablas_reales(escenario)
+
+
+@pytest.mark.asyncio
+async def test_real_014_agrega_fulltext_idempotente_y_match_usa_el_indice():
+    consulta = ("EXPLAIN SELECT id, conversation_id, role, content, created_at FROM messages "
+                "WHERE MATCH(content) AGAINST ('memoria compartida' IN NATURAL LANGUAGE MODE) LIMIT 10")
+    async def escenario(c1):
+        async with c1.cursor() as cur:
+            await cur.execute("SHOW CREATE TABLE messages"); ddl = (await cur.fetchone())["Create Table"]
+            assert "VECTOR KEY" in ddl.upper() and "ON DELETE CASCADE" in ddl.upper()
+            assert "ft_messages_content" not in ddl
+            await cur.execute("INSERT INTO conversations (conversation_uuid) VALUES ('u1')")
+            await cur.execute("INSERT INTO messages (conversation_id,turn_number,role,content) VALUES "
+                              "(1,1,'user','la memoria compartida encuentra los mensajes'),"
+                              "(1,2,'user','texto sin las palabras de la consulta')")
+            for _ in range(2):
+                for st in _sentencias("014_messages_fulltext.sql", timeout=10):
+                    await cur.execute(st)
+            await cur.execute("SHOW INDEX FROM messages")
+            assert "ft_messages_content" in {r["Key_name"] for r in await cur.fetchall()}
+            await cur.execute(consulta); plan = await cur.fetchone()
+        assert plan["key"] == "ft_messages_content", plan
+        assert "filesort" not in (plan["Extra"] or "").lower() and "temporary" not in (plan["Extra"] or "").lower(), plan
     await _con_tablas_reales(escenario)
 
 
@@ -703,20 +741,20 @@ async def test_real_013_quita_idx_conversation_sin_que_ninguna_consulta_pierda_p
 
 @pytest.mark.asyncio
 async def test_real_la_marcha_atras_del_readme_restaura_el_estado_de_produccion_dos_veces():
-    """Ejecuta los pasos 013/012/011 del README sobre la DDL real despues de aplicar las tres migraciones."""
+    """Ejecuta los pasos 014..011 del README sobre la DDL real despues de aplicar las migraciones."""
     bloque = _re.search(r"```sql\n(.*?)```", (_MIG / "README.md").read_text(encoding="utf-8"), _re.S).group(1)
     pasos = [x.strip() for x in "\n".join(l for l in bloque.splitlines() if not l.lstrip().startswith("--")).split(";") if x.strip()]
     sobre_tablas = [p for p in pasos if "messages" in p or "conversations" in p or "lock_wait" in p]
-    assert len(sobre_tablas) == 4
+    assert len(sobre_tablas) == 5
     async def escenario(c1):
         async with c1.cursor() as cur:
-            for n in ("011_messages_conversation_turn_index.sql", "012_conversations_open_index.sql", "013_messages_drop_redundant_conversation_index.sql"):
+            for n in ("011_messages_conversation_turn_index.sql", "012_conversations_open_index.sql", "013_messages_drop_redundant_conversation_index.sql", "014_messages_fulltext.sql"):
                 for st in _sentencias(n, timeout=10): await cur.execute(st)
             for _ in range(2):
                 for st in sobre_tablas: await cur.execute(st)
             await cur.execute("SHOW INDEX FROM messages"); m = {r["Key_name"] for r in await cur.fetchall()}
             await cur.execute("SHOW INDEX FROM conversations"); c = {r["Key_name"] for r in await cur.fetchall()}
-        assert "idx_conversation" in m and "idx_messages_conversation_turn" not in m and "idx_conversations_open" not in c
+        assert "idx_conversation" in m and "idx_messages_conversation_turn" not in m and "ft_messages_content" not in m and "idx_conversations_open" not in c
     await _con_tablas_reales(escenario)
 
 
@@ -727,4 +765,4 @@ def test_el_esquema_versionado_ordena_los_indices_como_los_deja_show_create_tras
     conv = _re.search(r"CREATE TABLE `conversations` \(.*?\) ENGINE", texto, _re.S).group(0)
     msgs = _re.search(r"CREATE TABLE `messages` \(.*?\) ENGINE", texto, _re.S).group(0)
     assert conv.index("`idx_conv_tenant`") < conv.index("`idx_conversations_open`")
-    assert msgs.index("`idx_msg_scope`") < msgs.index("`idx_messages_conversation_turn`") < msgs.index("VECTOR KEY")
+    assert msgs.index("`idx_msg_scope`") < msgs.index("`idx_messages_conversation_turn`") < msgs.index("VECTOR KEY") < msgs.index("ft_messages_content")
