@@ -71,6 +71,19 @@ def _ddl_de_duenio() -> str:
 
 
 class FormaDelDDLTest(unittest.TestCase):
+    def test_indice_de_pipelines_por_tenant_esta_en_la_lista_idempotente(self):
+        entrada = ("jacobs_pipelines", "idx_pipelines_tenant_status_date")
+        indices = {(tabla, nombre): (ddl, acotado)
+                   for tabla, nombre, ddl, acotado in store._INDICES}
+        self.assertIn(entrada, indices)
+        ddl, acotado = indices[entrada]
+        self.assertTrue(acotado)
+        self.assertEqual(
+            ddl,
+            "CREATE INDEX idx_pipelines_tenant_status_date ON jacobs_pipelines "
+            "(tenant_id, status, descartado_at, pipeline_id) ALGORITHM=INPLACE LOCK=NONE",
+        )
+
     def test_el_indice_de_duenio_esta_en_la_lista_idempotente(self):
         entradas = {(t, i): acotado for t, i, _d, acotado in store._INDICES}
         self.assertIn(_ENTRADA, entradas)
