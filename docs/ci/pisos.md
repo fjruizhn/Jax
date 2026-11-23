@@ -970,6 +970,12 @@ matriz parametrizada de esa ronda se retiró al volver al scanner de `68557946`;
 sus exclusiones de `docker exec/run` suprimían marcas que master sí hacía. El
 piso se vuelve a fijar desde los **3537 de master**.
 
+3932 → 3943 (2026-11-23, fix/jail-git-fsmonitor, re-medido tras la auditoría B-1/m-1/m-2): +11 pruebas de `JailDeGitTest` en
+`las_manos/_tool_authority_test.py` (el jail rechaza `.git`, `.gitattributes` y `.gitmodules` sin
+depender de `forbidden_paths`; `_git_commit_write` no ejecuta fsmonitor/hooks/gpg del repo y corre con
+entorno mínimo). Archivo: 66 → 77 passed (más 30 subtests, que pytest reporta aparte). Medido LOCAL
+(Python 3.14); a confirmar en el runner, que tiene la última palabra.
+
 3922 → 3923 (2026-10-22, JAX#409): +1 regresión pura para que la normalización
 del `CHECK` del namespace Office conserve la agrupación booleana y los bytes de
 literales e identificadores delimitados. El paso **Piso exacto de tests

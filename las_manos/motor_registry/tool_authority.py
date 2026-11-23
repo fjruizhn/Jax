@@ -44,6 +44,7 @@ import json
 import logging
 import os
 import re
+import stat
 import subprocess
 import tempfile
 from pathlib import Path
@@ -133,6 +134,41 @@ async def _execution_error(*, job_id: str, tool_name: str, caller: str, reason: 
     return {"tool_name": tool_name, "decision": "execution_error", "reason": reason, "content": None}
 
 
+# Nombres de git que un modelo con write_file puede convertir en ejecución de
+# comandos. Hallazgo reproducido (fix/jail-git-fsmonitor): write_file(".git/config",
+# "[core]\n\tfsmonitor = <cmd>") era aceptado, y el `git add` de _git_commit_write
+# ejecutaba <cmd> con el entorno de LAS MANOS (credenciales de base y de servicio).
+#   - `.git` en CUALQUIER nivel (config, hooks/, info/attributes, también repos
+#     anidados y submódulos): contiene la configuración y los hooks que git ejecuta.
+#   - `.gitattributes` (filter.<x>.clean/smudge/process) y `.gitmodules` (URLs y
+#     comandos de submódulo): fuera de .git también dirigen a git.
+# Comparación en minúsculas a propósito: en Linux ext4 `.GIT` no es `.git`, pero en un
+# FS insensible a mayúsculas (macOS, un volumen montado) sí; rechazar de más no cuesta
+# nada y rechazar de menos sí. La comparación es por COMPONENTE completo, nunca por
+# prefijo de texto: `.github/`, `gitnotes.md` o `.gitignore` siguen permitidos.
+_COMPONENTE_GIT = ".git"
+_ARCHIVOS_GIT_PROHIBIDOS = frozenset({".gitattributes", ".gitmodules"})
+
+
+def _razon_git_prohibido(candidate: Path, resolved: Path) -> str | None:
+    """Devuelve la razón de rechazo si la ruta toca .git/.gitattributes/.gitmodules.
+
+    Se mira DOS formas: la RESUELTA (sigue symlinks: un enlace `atajo -> .git`
+    resuelve a `.git/...`) y la LÉXICA normalizada del candidato (`os.path.normpath`,
+    colapsa `..` sin seguir enlaces: un symlink llamado `.gitattributes` que apunta a
+    un archivo común resuelve a otro nombre, pero git lo vería con ese nombre)."""
+    for forma in (resolved, Path(os.path.normpath(candidate))):
+        try:
+            partes = forma.relative_to(WORKSPACE_ROOT).parts
+        except ValueError:
+            continue  # la forma léxica pudo no ser relativa; el jail de arriba ya decidió
+        if any(p.lower() == _COMPONENTE_GIT for p in partes):
+            return "ruta prohibida: toca un directorio '.git' (config y hooks de git son código ejecutable)"
+        if partes and partes[-1].lower() in _ARCHIVOS_GIT_PROHIBIDOS:
+            return f"ruta prohibida: '{partes[-1]}' dirige a git (filtros/submódulos ejecutables)"
+    return None
+
+
 def resolve_jailed_path(path_str: str, forbidden_paths: list[str]) -> tuple[Path | None, str | None]:
     """Resuelve path_str contra WORKSPACE_ROOT y lo valida. Devuelve
     (ruta_resuelta, None) si pasa, o (None, razón) si rechaza.
@@ -175,6 +211,13 @@ def resolve_jailed_path(path_str: str, forbidden_paths: list[str]) -> tuple[Path
     # "resolved no es descendiente de WORKSPACE_ROOT" después de resolve().
     if resolved != WORKSPACE_ROOT and WORKSPACE_ROOT not in resolved.parents:
         return None, f"la ruta escapa del workspace (directo o vía symlink): resuelve a '{resolved}'"
+
+    # .git / .gitattributes / .gitmodules: independiente de forbidden_paths
+    # (que viene de la base y puede estar vacío o mal sembrado). Ver
+    # _razon_git_prohibido.
+    razon_git = _razon_git_prohibido(candidate, resolved)
+    if razon_git:
+        return None, razon_git
 
     # forbidden_paths: mismo principio, sobre la forma canónica. Un prefijo
     # de config.toml/DB como "secrets/" se resuelve UNA vez acá contra el
@@ -503,6 +546,59 @@ async def _read_file(*, job_id: str, tool_name: str, caller: str, resolved: Path
     return {"tool_name": tool_name, "decision": "executed", "reason": None, "content": wrapped, "bytes_read": size}
 
 
+# Endurecimiento del git que commitea lo escrito por el modelo (capa 2 del fix
+# fix/jail-git-fsmonitor; la capa 1 es _razon_git_prohibido). El .git/config del
+# workspace NO es de confianza: si alguien logra escribirlo, git no debe ejecutar
+# nada de lo que diga. Cada -c se apoya en la documentación de git 2.53
+# (git-config(1)); lo que `-c` no puede neutralizar queda a cargo de la capa 1 y
+# se lista abajo.
+#   core.fsmonitor=false      -- fuente del hallazgo: `git add` ejecuta el comando
+#                                (mismo patrón que jax/faro/git_objetos.py:20,
+#                                _GIT_SIN_HOOKS; se copia acá y no se importa para no
+#                                acoplar las_manos a jax/faro).
+#   core.hooksPath=/dev/null  -- ni .git/hooks ni un hooksPath del config (commit,
+#                                post-commit, pre-auto-gc...). Cubre también lo que
+#                                `--no-verify` no salta (post-commit).
+#   commit.gpgsign=false      -- + --no-gpg-sign: `gpg.program` del config sería un
+#                                ejecutable arbitrario al firmar.
+#   core.attributesFile / core.excludesFile = /dev/null -- no leer archivos de
+#                                atributos/ignorados fuera del repo.
+#   gc.auto=0, maintenance.auto=false -- `git commit` dispara `gc --auto` y
+#                                `maintenance run --auto` (git-gc(1), git-maintenance(1)):
+#                                procesos detrás del commit que además leen el config.
+# NO neutralizable con -c (cubierto por la capa 1, que prohíbe escribir estas
+# rutas): `include.path`/`includeIf` del config local (git no ofrece desactivarlos
+# por línea de comandos), `filter.<nombre>.clean/smudge/process` definidos en el
+# config local y activados por un .gitattributes ya existente, y .git/info/attributes.
+_GIT_ENDURECIDO = (
+    "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+    "-c", "commit.gpgsign=false", "-c", "core.attributesFile=/dev/null",
+    "-c", "core.excludesFile=/dev/null", "-c", "gc.auto=0", "-c", "maintenance.auto=false",
+    # B-1: nunca tratar un directorio con pinta de bare como repo; solo --git-dir explícito.
+    "-c", "safe.bareRepository=explicit",
+)
+
+
+def _entorno_git_minimo() -> dict[str, str]:
+    """Entorno EXPLÍCITO y mínimo para git: nada del proceso (ni JAX_*, ni
+    credenciales, ni GIT_DIR/GIT_SSH_COMMAND/GIT_EXEC_PATH...). Solo PATH (para
+    encontrar `git`; no es secreto), un HOME inexistente (que git no lea
+    ~/.gitconfig ni ~/.config/git), idioma fijo y el aislamiento de configuración:
+    GIT_CONFIG_NOSYSTEM=1 + GIT_CONFIG_GLOBAL=/dev/null (git-config(1), ENVIRONMENT)."""
+    return {
+        "PATH": os.environ.get("PATH") or "/usr/local/bin:/usr/bin:/bin",
+        "HOME": "/nonexistent",
+        "LANG": "C", "LC_ALL": "C",
+        "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_ATTR_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0",
+        # m-1: `--` no apaga la magia de pathspec (":(glob)**" añadía archivos ajenos);
+        # git-add(1)/gitglossary(7): GIT_LITERAL_PATHSPECS = --literal-pathspecs.
+        "GIT_LITERAL_PATHSPECS": "1",
+        # B-1: defensa en profundidad -- git no sube de WORKSPACE_ROOT buscando un repo.
+        "GIT_CEILING_DIRECTORIES": str(WORKSPACE_ROOT.parent),
+    }
+
+
 def _git_commit_write(resolved: Path, *, job_id: str, tool_call_id: str) -> tuple[bool, str | None, str | None]:
     """Commitea UN archivo (git add -- <path> puntual, nunca -A -- así un
     commit del bucle no puede capturar trabajo a medias de Hyde escribiendo
@@ -516,25 +612,44 @@ def _git_commit_write(resolved: Path, *, job_id: str, tool_call_id: str) -> tupl
     tumbar el job -- la escritura en disco YA ocurrió, fail-closed no es
     retroactivo. El caller decide qué hacer con (ok=False, error=...)."""
     rel = resolved.relative_to(WORKSPACE_ROOT)
-    base_cmd = ["git", "-C", str(WORKSPACE_ROOT), "-c", f"user.name={_GIT_AUTHOR_NAME}", "-c", f"user.email={_GIT_AUTHOR_EMAIL}"]
+    # B-1 (auditoría de escalón 3): NO se deja que git DESCUBRA el repo. Si
+    # WORKSPACE_ROOT/.git no existe (ya pasó, DEUDA.md), el modelo puede escribir
+    # HEAD, objects/k, refs/heads/k, config e info/attributes en la RAÍZ -- ninguna
+    # ruta contiene `.git`, la capa 1 no las ve -- y git descubriría la raíz como repo
+    # bare y ejecutaría el filtro. Se exige un `.git` DIRECTORIO REAL (lstat: ni
+    # symlink ni archivo `gitdir: ...`, que apuntaría a otro repo fuera del jail) y
+    # se pasa --git-dir/--work-tree explícitos. Falla cerrado, sin ejecutar git.
+    git_dir = WORKSPACE_ROOT / ".git"
     try:
-        add = subprocess.run(base_cmd + ["add", "--", str(rel)], capture_output=True, text=True, timeout=10)
+        modo = os.lstat(git_dir).st_mode
+    except OSError as exc:
+        return False, None, f"workspace sin .git propio ({git_dir}): {exc.strerror or exc}; no se ejecuta git"
+    if not stat.S_ISDIR(modo):
+        return False, None, f"{git_dir} no es un directorio .git real (symlink o archivo gitdir); no se ejecuta git"
+    base_cmd = ["git", "--git-dir", str(git_dir), "--work-tree", str(WORKSPACE_ROOT),
+                "--literal-pathspecs", *_GIT_ENDURECIDO,
+                "-c", f"user.name={_GIT_AUTHOR_NAME}", "-c", f"user.email={_GIT_AUTHOR_EMAIL}"]
+    env = _entorno_git_minimo()
+
+    def _git(args: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(base_cmd + args, capture_output=True, text=True, timeout=10, env=env)
+
+    try:
+        add = _git(["add", "--", str(rel)])
         if add.returncode != 0:
             return False, None, f"git add falló: {add.stderr.strip()}"
-        commit = subprocess.run(
-            base_cmd + ["commit", "-m", f"tool_authority: write_file {rel} (job={job_id} tool_call={tool_call_id})"],
-            capture_output=True, text=True, timeout=10,
-        )
+        commit = _git(["commit", "--no-verify", "--no-gpg-sign",
+                       "-m", f"tool_authority: write_file {rel} (job={job_id} tool_call={tool_call_id})"])
         if commit.returncode != 0:
             # "nothing to commit" pasa si el contenido nuevo es IDÉNTICO al
             # ya commiteado (el modelo reescribe lo mismo) -- no es un
             # fallo real, el árbol ya refleja el estado deseado. Cualquier
             # otro código de salida sí es un fallo real de git.
             if "nothing to commit" in commit.stdout + commit.stderr:
-                head = subprocess.run(base_cmd + ["rev-parse", "HEAD"], capture_output=True, text=True, timeout=10)
+                head = _git(["rev-parse", "HEAD"])
                 return True, (head.stdout.strip() if head.returncode == 0 else None), None
             return False, None, f"git commit falló: {commit.stderr.strip()}"
-        sha = subprocess.run(base_cmd + ["rev-parse", "HEAD"], capture_output=True, text=True, timeout=10)
+        sha = _git(["rev-parse", "HEAD"])
         return True, (sha.stdout.strip() if sha.returncode == 0 else None), None
     except (subprocess.TimeoutExpired, OSError) as exc:
         return False, None, f"{type(exc).__name__}: {exc}"

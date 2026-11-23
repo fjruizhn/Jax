@@ -110,8 +110,8 @@
       "mensaje": "PISO ROTO: se esperaban exactamente 15 tests CORRIDOS de F2-E structured projection."
     },
     "tests-puros/out": {
-      "patron": "^3932 passed, 45 skipped",
-      "mensaje": "PISO ROTO: se esperaban 3932 tests CORRIDOS, exactamente 45 skipped y se observó 1 xfailed (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido en el runner CI del PR410 el 2026-10-22; suma nueve casos unitarios del creador Office a los 3923 previos, con 45 skipped y 1 xfailed sin cambios."
+      "patron": "^3943 passed, 45 skipped",
+      "mensaje": "PISO ROTO: se esperaban 3943 tests CORRIDOS, exactamente 45 skipped y se observó 1 xfailed (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido en el runner CI del PR410 el 2026-10-22; suma nueve casos unitarios del creador Office a los 3923 previos, con 45 skipped y 1 xfailed sin cambios. Subido a 3943 (+11 de JailDeGitTest en las_manos/_tool_authority_test.py: jail de .git/.gitattributes/.gitmodules y git endurecido en _git_commit_write, .git real exigido, pathspec literal); medido local, a confirmar en el runner."
     },
     "tests-puros/arranque_instalado": {
       "patron": "^46 passed, 9 skipped",
