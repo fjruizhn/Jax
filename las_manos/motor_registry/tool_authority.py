@@ -44,6 +44,7 @@ import json
 import logging
 import os
 import re
+import stat
 import subprocess
 import tempfile
 from pathlib import Path
@@ -573,6 +574,8 @@ _GIT_ENDURECIDO = (
     "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
     "-c", "commit.gpgsign=false", "-c", "core.attributesFile=/dev/null",
     "-c", "core.excludesFile=/dev/null", "-c", "gc.auto=0", "-c", "maintenance.auto=false",
+    # B-1: nunca tratar un directorio con pinta de bare como repo; solo --git-dir explícito.
+    "-c", "safe.bareRepository=explicit",
 )
 
 
@@ -588,6 +591,11 @@ def _entorno_git_minimo() -> dict[str, str]:
         "LANG": "C", "LC_ALL": "C",
         "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_ATTR_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0",
+        # m-1: `--` no apaga la magia de pathspec (":(glob)**" añadía archivos ajenos);
+        # git-add(1)/gitglossary(7): GIT_LITERAL_PATHSPECS = --literal-pathspecs.
+        "GIT_LITERAL_PATHSPECS": "1",
+        # B-1: defensa en profundidad -- git no sube de WORKSPACE_ROOT buscando un repo.
+        "GIT_CEILING_DIRECTORIES": str(WORKSPACE_ROOT.parent),
     }
 
 
@@ -604,7 +612,22 @@ def _git_commit_write(resolved: Path, *, job_id: str, tool_call_id: str) -> tupl
     tumbar el job -- la escritura en disco YA ocurrió, fail-closed no es
     retroactivo. El caller decide qué hacer con (ok=False, error=...)."""
     rel = resolved.relative_to(WORKSPACE_ROOT)
-    base_cmd = ["git", "-C", str(WORKSPACE_ROOT), *_GIT_ENDURECIDO,
+    # B-1 (auditoría de escalón 3): NO se deja que git DESCUBRA el repo. Si
+    # WORKSPACE_ROOT/.git no existe (ya pasó, DEUDA.md), el modelo puede escribir
+    # HEAD, objects/k, refs/heads/k, config e info/attributes en la RAÍZ -- ninguna
+    # ruta contiene `.git`, la capa 1 no las ve -- y git descubriría la raíz como repo
+    # bare y ejecutaría el filtro. Se exige un `.git` DIRECTORIO REAL (lstat: ni
+    # symlink ni archivo `gitdir: ...`, que apuntaría a otro repo fuera del jail) y
+    # se pasa --git-dir/--work-tree explícitos. Falla cerrado, sin ejecutar git.
+    git_dir = WORKSPACE_ROOT / ".git"
+    try:
+        modo = os.lstat(git_dir).st_mode
+    except OSError as exc:
+        return False, None, f"workspace sin .git propio ({git_dir}): {exc.strerror or exc}; no se ejecuta git"
+    if not stat.S_ISDIR(modo):
+        return False, None, f"{git_dir} no es un directorio .git real (symlink o archivo gitdir); no se ejecuta git"
+    base_cmd = ["git", "--git-dir", str(git_dir), "--work-tree", str(WORKSPACE_ROOT),
+                "--literal-pathspecs", *_GIT_ENDURECIDO,
                 "-c", f"user.name={_GIT_AUTHOR_NAME}", "-c", f"user.email={_GIT_AUTHOR_EMAIL}"]
     env = _entorno_git_minimo()
 
