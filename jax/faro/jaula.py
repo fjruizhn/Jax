@@ -30,6 +30,12 @@ revalidan aqui (`desde_control`).
 
 BITACORA PRIMERO: `jaula_lanzada` se anota antes de arrancar (si no se puede anotar, no se lanza); un fallo de
 arranque queda como `jaula_fallo` y se propaga.
+
+LA UNIDAD (0.6 / R-2). El lanzador exige el gestor de unidades (`ScopeManager`, `scope.py`): la jaula no
+es un proceso suelto, es el comando de la unidad transitoria `faro-jaula-u<uid>.service`, con limites de
+memoria/CPU/tareas y `--pipe`. Si la unidad no se puede arrancar y VERIFICAR, no hay jaula (`jaula_fallo`).
+La vida de un uid ya no se mira en el `Popen` que el lanzador recuerda: se pregunta al cgroup (`jaula_viva`
+es `estado(uid) is not EMPTY`: un UNKNOWN retiene).
 """
 from __future__ import annotations
 
@@ -47,6 +53,7 @@ from pathlib import Path, PurePosixPath
 from . import relay as _relay
 from .bitacora import Bitacora
 from .config import ConfigFaroInvalida
+from .scope import EstadoUnidad
 
 logger = logging.getLogger(__name__)
 DESTINO_SOCKET = "/faro/puerto.sock"
@@ -54,7 +61,6 @@ DESTINO_TOKEN = "/faro/token"
 DESTINO_RELAY_RAIZ = "/faro/relay"
 DESTINO_RELAY = "/faro/relay/jax/faro/relay.py"
 RELAY_FUENTE = str(Path(_relay.__file__))
-ENTORNO_LANZADOR = {"PATH": "/usr/bin:/bin"}
 _UID_MAX = 2 ** 32 - 2
 _ELEVAR_EJEMPLO = ("/usr/bin/sudo", "-n", "-u", "#{uid}", "--")
 _COMANDO_EJEMPLO = ("/usr/bin/python3", "-m", "jax.faro.relay", "--socket", DESTINO_SOCKET, "--token-file", DESTINO_TOKEN)
@@ -195,20 +201,28 @@ def _validar_comando(comando: object) -> list[str]:
 
 
 class LanzadorJaula:
-    def __init__(self, cfg: ConfigJaula, bitacora: Bitacora, *, uids_prohibidos: Iterable[int] = (),
-                 crear_proceso: Callable | None = None, uid_min: int | None = None, uid_max: int | None = None):
+    def __init__(self, cfg: ConfigJaula, bitacora: Bitacora, scope, *,
+                 uids_prohibidos: Iterable[int] = (), uid_min: int | None = None, uid_max: int | None = None):
+        """`scope` es el gestor de unidades de 0.6 (`ScopeManager`) y es OBLIGATORIO (R-2): sin unidad de
+        cgroup con limites no hay jaula, y sin su consulta no hay liveness del uid."""
+        if scope is None:
+            raise ConfigFaroInvalida(
+                "sin el gestor de unidades (scope de 0.6) no hay lanzador: la jaula corre en su unidad"
+                " faro-jaula-u<uid>.service con limites, no como un proceso suelto (R-2)")
         self._cfg = cfg
         self._bitacora = bitacora
+        self._scope = scope
         self._prohibidos = frozenset(uids_prohibidos)
         self._rango = (uid_min, uid_max) if uid_min is not None and uid_max is not None else None
-        self._crear_proceso = crear_proceso if crear_proceso is not None else asyncio.create_subprocess_exec
-        self._procesos: dict[int, list] = {}          # uid de jaula -> procesos lanzados (para `jaula_viva`)
         self._vigias: set[asyncio.Task] = set()
+        self._lanzamientos: set[asyncio.Task] = set()
+        self._errores_vigia: list[BaseException] = []
+        self._cerrado = False
 
     @classmethod
-    def desde_control(cls, cfg: ConfigJaula, bitacora: Bitacora, control, **kw) -> "LanzadorJaula":
+    def desde_control(cls, cfg: ConfigJaula, bitacora: Bitacora, scope, control, **kw) -> "LanzadorJaula":
         """Con el rango de uids de jaula y el uid del orquestador del canal de control: el lanzador los REVALIDA."""
-        return cls(cfg, bitacora, uids_prohibidos={control.orquestador_uid}, uid_min=control.jaula_uid_min,
+        return cls(cfg, bitacora, scope, uids_prohibidos={control.orquestador_uid}, uid_min=control.jaula_uid_min,
                    uid_max=control.jaula_uid_max, **kw)
 
     def argv(self, ejecucion, ruta_socket: str, ruta_token: str, comando: Sequence[str], *, perfil: str = "rele",
@@ -230,47 +244,78 @@ class LanzadorJaula:
         uid = str(ejecucion.uid_esperado)
         return [*(e.replace("{uid}", uid) for e in self._cfg.elevar), str(self._cfg.bwrap), *cuerpo]
 
-    def jaula_viva(self, uid: int) -> bool:
-        """¿Sigue vivo algun proceso lanzado con ese uid de jaula? (gancho del canal de control: no reasignar un uid vivo)"""
-        return any(getattr(p, "returncode", 0) is None for p in self._procesos.get(uid, ()))
+    async def jaula_viva(self, uid: int) -> bool:
+        """¿Sigue viva la unidad/cgroup de ese uid de jaula? (gancho del canal de control: no reasignar un
+        uid vivo). Vive mientras haya procesos en su cgroup O MIENTRAS NO SE PUEDA CONCLUIR: UNKNOWN
+        retiene (R-2)."""
+        return await self._scope.estado(uid) is not EstadoUnidad.EMPTY
 
     async def esperar_terminos(self) -> None:
-        if self._vigias:
-            await asyncio.gather(*self._vigias, return_exceptions=True)
+        while self._vigias:
+            await asyncio.gather(*tuple(self._vigias), return_exceptions=True)
+        if self._errores_vigia:
+            errores, self._errores_vigia = self._errores_vigia, []
+            raise BaseExceptionGroup("falló el waiter/drenaje de una jaula", errores)
 
     async def _vigilar(self, e, proceso) -> None:
-        rc = await proceso.wait()
+        rc = await self._scope.finalizar_natural(e.uid_esperado, proceso)
         try:
             await self._bitacora.registrar("jaula_termino", run_id=e.run_id, id_correlacion=e.id_correlacion,
                                            uid_jaula=e.uid_esperado, rc=rc)
         except Exception:  # fail-closed: la jaula ya termino; solo la anotacion fallo y queda en el log
             logger.exception("no se pudo registrar el termino de la jaula de %s", e.run_id)
 
+    def _termino_vigia(self, tarea: asyncio.Task) -> None:
+        self._vigias.discard(tarea)
+        if tarea.cancelled():
+            self._errores_vigia.append(asyncio.CancelledError())
+            return
+        error = tarea.exception()
+        if error is not None:
+            self._errores_vigia.append(error)
+
+    async def cerrar(self) -> None:
+        """Cierra admisión y propaga todo fallo de vigía que ya haya terminado."""
+        self._cerrado = True
+        propios = set(self._lanzamientos)
+        propios.discard(asyncio.current_task())
+        if propios:
+            await asyncio.gather(*propios, return_exceptions=True)
+        await self.esperar_terminos()
+
     async def lanzar(self, srv, comando: Sequence[str], **perfil):
-        """Anota `jaula_lanzada` y arranca el proceso (que se devuelve); cuando termina anota `jaula_termino` con su
-        codigo de salida. `srv` es el `ServidorPuerto` de la ejecucion."""
-        e = srv.ejecucion
-        argv = self.argv_completo(e, str(srv.ruta_socket), str(srv.ruta_token), comando, **perfil)    # valida ANTES de anotar o arrancar
-        await self._bitacora.registrar(
-            "jaula_lanzada", run_id=e.run_id, id_correlacion=e.id_correlacion, uid_jaula=e.uid_esperado, motor=e.motor,
-            entry_point=e.entry_point, hash_argv=hashlib.sha256("\x00".join(argv).encode()).hexdigest())
+        """Anota `jaula_lanzada` y arranca la UNIDAD del uid con el argv completo (elevacion + bwrap);
+        cuando el proceso --pipe termina, anota `jaula_termino` con su codigo de salida. `srv` es el
+        `ServidorPuerto` de la ejecucion. La unidad no verificada no se da por lanzada: `arrancar` falla
+        cerrado (y anota `jaula_fallo`)."""
+        if self._cerrado:
+            raise ConfigFaroInvalida("el lanzador de jaulas está cerrado; se rechazan nuevos lanzamientos")
+        tarea_actual = asyncio.current_task()
+        if tarea_actual is None:
+            raise RuntimeError("lanzar requiere una tarea asyncio")
+        self._lanzamientos.add(tarea_actual)
         try:
-            proceso = await self._crear_proceso(
-                *argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                env=dict(ENTORNO_LANZADOR), start_new_session=True)
-        except Exception as exc:
+            e = srv.ejecucion
+            argv = self.argv_completo(e, str(srv.ruta_socket), str(srv.ruta_token), comando, **perfil)    # valida ANTES de anotar o arrancar
+            await self._bitacora.registrar(
+                "jaula_lanzada", run_id=e.run_id, id_correlacion=e.id_correlacion, uid_jaula=e.uid_esperado, motor=e.motor,
+                entry_point=e.entry_point, hash_argv=hashlib.sha256("\x00".join(argv).encode()).hexdigest())
             try:
-                await self._bitacora.registrar("jaula_fallo", run_id=e.run_id, id_correlacion=e.id_correlacion,
-                                               uid_jaula=e.uid_esperado, motivo=type(exc).__name__)
-            except Exception:  # fail-closed: el error de arranque es el que sube; solo la anotacion fallo
-                pass
-            raise
-        if hasattr(proceso, "wait"):
-            self._procesos.setdefault(e.uid_esperado, []).append(proceso)
-            tarea = asyncio.create_task(self._vigilar(e, proceso), name=f"faro-jaula-{e.run_id}")
-            self._vigias.add(tarea)
-            tarea.add_done_callback(self._vigias.discard)
-        return proceso
+                proceso = await self._scope.arrancar(e.uid_esperado, argv)
+            except Exception as exc:
+                try:
+                    await self._bitacora.registrar("jaula_fallo", run_id=e.run_id, id_correlacion=e.id_correlacion,
+                                                   uid_jaula=e.uid_esperado, motivo=type(exc).__name__)
+                except Exception:  # fail-closed: el error de arranque es el que sube; solo la anotacion fallo
+                    pass
+                raise
+            if hasattr(proceso, "wait"):
+                tarea = asyncio.create_task(self._vigilar(e, proceso), name=f"faro-jaula-{e.run_id}")
+                self._vigias.add(tarea)
+                tarea.add_done_callback(self._termino_vigia)
+            return proceso
+        finally:
+            self._lanzamientos.discard(tarea_actual)
 
 
 # --------------------------------------------------------------------------- #

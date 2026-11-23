@@ -35,6 +35,7 @@ from jax.faro.bitacora import Bitacora
 from jax.faro.config import ConfigPuerto
 from jax.faro.control import ConfigControl, ServidorControl
 from jax.faro.jaula import ConfigJaula, LanzadorJaula, argv_montajes
+from jax.faro.scope import EstadoUnidad
 from jax.faro.transporte import ServidorPuerto
 from tests._faro_utils import RAIZ, corre, ejecucion, paquete_listo, puerto
 
@@ -230,12 +231,53 @@ except (ConnectionResetError, BrokenPipeError):
 """
 
 
+class _ScopeSiempreVacio:
+    """Doble del gestor de unidades para las pruebas de uids reales del CANAL: aqui no se ejercita 0.6,
+    solo SO_PEERCRED; las unidades no existen y el doble siempre lo confirma (EMPTY)."""
+
+    def __init__(self):
+        self._token = None
+
+    async def adquirir_instancia(self):
+        self._token = object()
+        return self._token
+
+    async def liberar_instancia(self, token):
+        assert token is self._token
+        self._token = None
+
+    async def recuperar_leases(self):
+        return None
+
+    async def estado(self, uid):
+        return EstadoUnidad.EMPTY
+
+    async def matar(self, uid):
+        return None
+
+    async def esperar_vacio(self, uid, *, plazo_s=None):
+        return EstadoUnidad.EMPTY
+
+    def cerrar_admision(self):
+        return None
+
+    def bloquear_uid(self, uid):
+        return None
+
+    async def esperar_limpiezas(self):
+        return None
+
+    async def cerrar_uid(self, uid):
+        return None
+
+
 def _control(mundo, registros):
     d = mundo.base / "control"
     d.mkdir(mode=0o750)
     cfg = ConfigControl(control_dir=d, orquestador_uid=NOBODY, jaula_uid_min=20, jaula_uid_max=40, plazo_s=5.0)
     bit = Bitacora(emisores=[registros.append])
-    return ServidorControl(cfg, lambda ej: ServidorPuerto(mundo.cfg_puerto, ej, mundo.cargado, bit), bit)
+    return ServidorControl(cfg, lambda ej: ServidorPuerto(mundo.cfg_puerto, ej, mundo.cargado, bit), bit,
+                           _ScopeSiempreVacio())
 
 
 def test_el_canal_de_control_autentica_por_el_uid_real_del_kernel(mundo, requiere_sudo):
@@ -273,6 +315,10 @@ def test_un_uid_de_jaula_real_no_abre_el_socket_de_control(mundo, requiere_sudo)
 # --------------------------------------------------------------------------- #
 
 def test_lanzar_arranca_el_proceso_con_el_kernel_uid_de_la_jaula(mundo, requiere_sudo):
+    """La ELEVACION aislada (0.3c, sin unidad): el uid del kernel lo pone la elevacion, no el argv. El
+    camino completo CON unidad (lanzar -> systemd-run -> unidad verificada -> kill) esta en
+    `tests/test_faro_scope.py::TestUserManagerReal`, que necesita user manager y aqui no puede estar: el
+    job `faro-jaula` de CI exige cero saltados y el runner no tiene user manager."""
     falso = mundo.base / "bwrap-falso"
     falso.write_text("#!/usr/bin/python3\nimport os\nprint(os.getuid(), os.getgid())\n")
     falso.chmod(0o755)
@@ -280,8 +326,12 @@ def test_lanzar_arranca_el_proceso_con_el_kernel_uid_de_la_jaula(mundo, requiere
 
     async def caso():
         bit = Bitacora(emisores=[])
+        l = LanzadorJaula(cfg, bit, _ScopeSiempreVacio())
         async with ServidorPuerto(mundo.cfg_puerto, ejecucion(uid_esperado=JAULA), mundo.cargado, bit) as srv:
-            p = await LanzadorJaula(cfg, bit).lanzar(srv, ["/usr/bin/true"])
+            argv = l.argv_completo(srv.ejecucion, str(srv.ruta_socket), str(srv.ruta_token), ["/usr/bin/true"])
+            p = await asyncio.create_subprocess_exec(
+                *argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE)
             salida, _ = await asyncio.wait_for(p.communicate(), 20)
             return salida.decode().split()
     uid, _gid = corre(caso())
@@ -306,6 +356,44 @@ print(json.dumps(r))
 """
 
 
+SONDA_PRIVILEGIOS_CGROUP = r"""
+import json, os
+
+estado = {}
+with open("/proc/self/status", encoding="utf-8") as f:
+    for linea in f:
+        if ":" in linea:
+            clave, valor = linea.split(":", 1)
+            estado[clave] = valor.strip()
+
+tipos_montaje = []
+with open("/proc/self/mountinfo", encoding="utf-8") as f:
+    for linea in f:
+        partes = linea.rstrip("\n").split(" - ", 1)
+        if len(partes) == 2:
+            tipos_montaje.append(partes[1].split()[0])
+
+fds_cgroup = []
+for fd in os.listdir("/proc/self/fd"):
+    try:
+        destino = os.readlink(f"/proc/self/fd/{fd}")
+    except FileNotFoundError:
+        # El descriptor puede cerrarse entre listdir y readlink; no es evidencia de un fd cgroup.
+        continue
+    if destino == "/sys/fs/cgroup" or destino.startswith("/sys/fs/cgroup/"):
+        fds_cgroup.append(destino)
+
+print(json.dumps({
+    "uid": os.getuid(),
+    "no_new_privs": estado.get("NoNewPrivs"),
+    "cap_eff": estado.get("CapEff"),
+    "cgroup2_montado": "cgroup2" in tipos_montaje,
+    "cgroup_visible": os.path.exists("/sys/fs/cgroup"),
+    "fds_cgroup": fds_cgroup,
+}))
+"""
+
+
 def _correr_bwrap(argv_montajes_, comando, **kw):
     return subprocess.run([shutil.which("bwrap"), *argv_montajes_, "--", *comando], capture_output=True, text=True, timeout=60, **kw)
 
@@ -326,6 +414,42 @@ def test_la_jaula_ve_solo_su_socket_su_token_y_el_rele(mundo, requiere_bwrap):
     assert vista["socket_dir_existe"] is False and "run" not in vista["raiz"]       # el directorio de sockets NO esta en la jaula
     assert vista["escribir_token"] != "ok" and vista["escribir_usr"] != "ok" and vista["escribir_relay"] != "ok"
     assert set(vista["env"]) - {"LC_CTYPE", "PWD"} == {"HOME", "PATH", "PYTHONDONTWRITEBYTECODE", "PYTHONPATH"}    # entorno minimo (LC_CTYPE lo pone Python, PWD bwrap)
+
+
+def test_bwrap_real_con_uid_de_jaula_no_tiene_privilegios_ni_cgroupfs(mundo, requiere_sudo, requiere_bwrap):
+    """La cadena productiva sudo -> bwrap conserva NNP, no tiene caps ni cgroupfs.
+
+    Sin una migración de cgroup dentro de la jaula, que el path no exista después del exact wait puede usarse
+    como una prueba del árbol muerto: ningún descriptor del proceso queda apuntando al cgroup del host.
+    """
+    relay = mundo.base / "relay-privilegios.py"
+    shutil.copy(RAIZ / "jax" / "faro" / "relay.py", relay)
+    relay.chmod(0o644)
+
+    async def caso():
+        bit = Bitacora(emisores=[])
+        async with ServidorPuerto(mundo.cfg_puerto, ejecucion(uid_esperado=NOBODY), mundo.cargado, bit) as srv:
+            argv = [
+                "sudo", "-n", "-u", f"#{NOBODY}", "--", shutil.which("bwrap"),
+                *argv_montajes(str(srv.ruta_socket), str(srv.ruta_token), relay=str(relay)), "--",
+                "/usr/bin/python3", "-c", SONDA_PRIVILEGIOS_CGROUP,
+            ]
+            proceso = await asyncio.create_subprocess_exec(
+                *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            salida, error = await asyncio.wait_for(proceso.communicate(), 30)
+            return proceso.returncode, salida.decode(), error.decode()
+
+    rc, salida, error = corre(caso())
+    assert rc == 0, error
+    sonda = json.loads(salida)
+    assert sonda == {
+        "uid": NOBODY,
+        "no_new_privs": "1",
+        "cap_eff": "0000000000000000",
+        "cgroup2_montado": False,
+        "cgroup_visible": False,
+        "fds_cgroup": [],
+    }
 
 
 def _params_jaula(sock, tok):
