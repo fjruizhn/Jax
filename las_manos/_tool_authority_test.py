@@ -862,6 +862,151 @@ def _test_path_con_separador(nombre, separador, entidad):
     return test
 
 
+# --- Jail de .git y git endurecido (fix/jail-git-fsmonitor) -------------------
+# Fallo reproducido: write_file(".git/config", "[core]\n\tfsmonitor = <cmd>") era
+# aceptado por el jail (solo miraba WORKSPACE_ROOT y forbidden_paths, que viene de
+# la base), y el `git add` siguiente de _git_commit_write ejecutaba <cmd> con el
+# entorno de LAS MANOS. Dos capas, las dos probadas acá: el jail no depende de la
+# base (forbidden_paths=[] en todos estos casos) y el git ya no ejecuta nada del repo.
+_RUTAS_GIT_PROHIBIDAS = [
+    ".git/config", "./.git/config", ".git/hooks/pre-commit", "./.git/hooks/pre-commit",
+    "sub/../.git/config", "a/.git/config", "a/b/.git/hooks/post-commit", ".git",
+    ".gitattributes", "sub/.gitattributes", "sub/.gitmodules", ".gitmodules",
+    # Variantes de mayúsculas: en Linux (FS sensible) `.GIT` no es `.git`, pero en un
+    # FS insensible (macOS, un volumen montado) sí lo es. Se rechaza igual: costo cero.
+    ".GIT/config", ".Git/hooks/x", ".GitAttributes", "sub/.GITMODULES",
+]
+
+
+class JailDeGitTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.workspace = Path(self._tmpdir.name).resolve()
+        self._git_sin_ayudantes = ["-c", "gc.auto=0", "-c", "core.fsmonitor=false"]
+        subprocess.run(["git", *self._git_sin_ayudantes, "init", "-q"], cwd=self.workspace, check=True)
+        (self.workspace / "base.md").write_text("base\n")
+        subprocess.run(["git", *self._git_sin_ayudantes, "-c", "user.name=t", "-c", "user.email=t@t",
+                        "add", "-A"], cwd=self.workspace, check=True)
+        subprocess.run(["git", *self._git_sin_ayudantes, "-c", "user.name=t", "-c", "user.email=t@t",
+                        "commit", "-q", "-m", "fixture inicial"], cwd=self.workspace, check=True)
+        self._patchers = [
+            patch.object(tool_authority, "WORKSPACE_ROOT", self.workspace),
+            patch.object(tool_authority, "event_append", AsyncMock()),
+        ]
+        for p in self._patchers:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_jail_rechaza_rutas_de_git_sin_depender_de_forbidden_paths(self):
+        for ruta in _RUTAS_GIT_PROHIBIDAS:
+            with self.subTest(ruta=ruta):
+                resuelta, razon = tool_authority.resolve_jailed_path(ruta, [])
+                assert resuelta is None, f"{ruta!r} debía rechazarse y resolvió a {resuelta}"
+                assert razon and "git" in razon, razon
+
+    def test_jail_rechaza_symlink_dentro_del_workspace_que_apunta_a_git(self):
+        (self.workspace / "atajo").symlink_to(self.workspace / ".git")
+        (self.workspace / "hooks_link").symlink_to(self.workspace / ".git" / "hooks")
+        # y un symlink LLAMADO .gitattributes/.gitmodules que apunta a un archivo común
+        (self.workspace / "otro.txt").write_text("x\n")
+        (self.workspace / "carpeta").mkdir()
+        (self.workspace / "carpeta" / ".gitattributes").symlink_to(self.workspace / "otro.txt")
+        for ruta in ("atajo/config", "hooks_link/pre-commit", "atajo", "carpeta/.gitattributes"):
+            with self.subTest(ruta=ruta):
+                resuelta, razon = tool_authority.resolve_jailed_path(ruta, [])
+                assert resuelta is None and razon, (ruta, resuelta, razon)
+
+    def test_jail_no_da_falsos_positivos_por_prefijo_de_texto(self):
+        for ruta in ("notas/ok.md", ".github/x.yml", "gitnotes.md", ".gitignore", "a/.gitkeep",
+                     "mi.git/x", "legit.git", "dir/.gitx/y", "x.gitattributes", ".git-algo/z"):
+            with self.subTest(ruta=ruta):
+                resuelta, razon = tool_authority.resolve_jailed_path(ruta, [])
+                assert resuelta is not None and razon is None, (ruta, razon)
+
+    async def test_write_file_a_git_config_se_rechaza_y_no_toca_el_config(self):
+        antes = (self.workspace / ".git" / "config").read_text()
+        catalogo = MotorCatalog({"capabilities": {"file_write": {
+            "allowed_callers": ["jacobs"], "risk_level": "medium", "sandbox_only": True,
+            "requires_human_gate": False, "max_execution_minutes": 1, "max_recursion_depth": 0,
+            "output_schema": "", "forbidden_paths": [],
+        }}})
+        r = await tool_authority.authorize_and_execute_tool_call(
+            tool_name="write_file", caller="jacobs", job_id="test-job-id", catalog=catalogo,
+            arguments_json=json.dumps({"path": ".git/config", "content": "[core]\n\tfsmonitor = x\n"}),
+        )
+        assert r["decision"] == "rejected", r
+        assert (self.workspace / ".git" / "config").read_text() == antes
+
+    # --- capa 2: el git de _git_commit_write no ejecuta nada que venga del repo ---
+
+    def _sembrar_config_hostil(self, testigo: Path):
+        """Todo lo que git ejecutaría desde el config/hooks del repo en add/commit."""
+        cfg = self.workspace / ".git" / "config"
+        cfg.write_text(cfg.read_text() + (
+            f'[core]\n\tfsmonitor = "touch {testigo}.fsmonitor"\n'
+            f'[commit]\n\tgpgsign = true\n'
+            f'[gpg]\n\tprogram = "{self.workspace}/gpg_falso.sh"\n'
+        ))
+        gpg = self.workspace.parent / f"{self.workspace.name}_gpg_falso.sh"
+        gpg.write_text(f"#!/bin/sh\ntouch {testigo}.gpg\nexit 1\n")
+        gpg.chmod(0o755)
+        cfg.write_text(cfg.read_text().replace(f"{self.workspace}/gpg_falso.sh", str(gpg)))
+        for hook in ("pre-commit", "commit-msg", "post-commit", "pre-auto-gc"):
+            h = self.workspace / ".git" / "hooks" / hook
+            h.write_text(f"#!/bin/sh\ntouch {testigo}.{hook}\n")
+            h.chmod(0o755)
+
+    def test_git_commit_write_no_ejecuta_fsmonitor_ni_hooks_ni_gpg_del_repo(self):
+        testigo = self.workspace.parent / f"{self.workspace.name}_testigo"
+        self._sembrar_config_hostil(testigo)
+        for sufijo in ("fsmonitor", "gpg", "pre-commit", "commit-msg", "post-commit", "pre-auto-gc"):
+            self.addCleanup(Path(f"{testigo}.{sufijo}").unlink, missing_ok=True)
+        nuevo = self.workspace / "normal.md"
+        nuevo.write_text("hola\n")
+
+        ok, sha, error = tool_authority._git_commit_write(nuevo, job_id="j", tool_call_id="t")
+
+        ejecutados = [s for s in ("fsmonitor", "gpg", "pre-commit", "commit-msg", "post-commit", "pre-auto-gc")
+                      if Path(f"{testigo}.{s}").exists()]
+        assert ejecutados == [], f"git ejecutó código del repo: {ejecutados}"
+        assert ok and sha and error is None, (ok, sha, error)
+        log = subprocess.run(["git", "-C", str(self.workspace), "log", "-1", "--format=%s %an"],
+                             capture_output=True, text=True, env={"PATH": os.environ["PATH"]})
+        assert "write_file normal.md" in log.stdout and "JAX Agent" in log.stdout, log.stdout
+
+    def test_git_commit_write_pasa_env_minimo_y_config_aislada(self):
+        llamadas = []
+        real = subprocess.run
+
+        def espia(cmd, *a, **kw):
+            llamadas.append((list(cmd), kw))
+            return real(cmd, *a, **kw)
+
+        nuevo = self.workspace / "normal2.md"
+        nuevo.write_text("hola\n")
+        entorno_padre = {"JAX_SENTINELA": "1", "JAX_DB_PASSWORD": "no-debe-pasar", "GEMINI_API_KEY": "k",
+                         "GIT_DIR": "/tmp/otro", "GIT_SSH_COMMAND": "x", "PATH": os.environ["PATH"],
+                         "HOME": "/root"}
+        with patch.dict(os.environ, entorno_padre, clear=True), \
+                patch.object(tool_authority.subprocess, "run", espia):
+            ok, sha, error = tool_authority._git_commit_write(nuevo, job_id="j", tool_call_id="t")
+        assert ok, error
+        assert len(llamadas) >= 3, llamadas
+        for cmd, kw in llamadas:
+            env = kw.get("env")
+            assert env is not None, f"subprocess.run sin env= explícito: {cmd}"
+            assert set(env) <= {"PATH", "HOME", "LANG", "LC_ALL", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL",
+                                "GIT_ATTR_NOSYSTEM", "GIT_TERMINAL_PROMPT", "GIT_OPTIONAL_LOCKS"}, sorted(env)
+            assert not any(k.startswith(("JAX_", "GEMINI", "GIT_DIR", "GIT_SSH")) for k in env), sorted(env)
+            assert env["GIT_CONFIG_NOSYSTEM"] == "1" and env["GIT_CONFIG_GLOBAL"] == "/dev/null", env
+            assert env["LC_ALL"] == "C", env
+            assert "-c" in cmd and "core.fsmonitor=false" in cmd and "core.hooksPath=/dev/null" in cmd, cmd
+            assert "commit.gpgsign=false" in cmd and "core.attributesFile=/dev/null" in cmd, cmd
+        commit = [c for c, _ in llamadas if "commit" in c][0]
+        assert "--no-verify" in commit and "--no-gpg-sign" in commit, commit
+
+
 for _nombre, _sep, _ent in _SEPARADORES_DE_SPLITLINES:
     _t = _test_path_con_separador(_nombre, _sep, _ent)
     setattr(ToolAuthorityTest, _t.__name__, _t)
